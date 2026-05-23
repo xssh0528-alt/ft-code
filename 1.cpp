@@ -2,6 +2,7 @@
 #include <dwmapi.h>
 #include <GL/gl.h>
 #include <iostream>
+#include <thread>
 
 // 引入 Dear ImGui 核心標頭檔
 #include "imgui.h"
@@ -12,11 +13,15 @@
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "opengl32.lib")
 
-// 全域變數
+// 全域控制變數
 HWND g_hWnd = nullptr;
 HDC g_hDC = nullptr;
 HGLRC g_hRC = nullptr;
 bool g_Running = false;
+bool g_ShowMenu = true;       // 對應 Python 的 ToggleMenu
+bool g_AimbotState = false;   // 測試用的自瞄狀態變數
+
+std::thread g_RenderThread;   // 渲染專用獨立執行緒
 
 // 轉發 Win32 視窗訊息給 ImGui
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -29,7 +34,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CLOSE:
             g_Running = false;
-            PostQuitMessage(0);
             return 0;
         case WM_DESTROY:
             return 0;
@@ -38,116 +42,92 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
 }
 
-// =================================================================
-// 匯出給 Python 呼叫的標準接口 (C-Style API)
-// =================================================================
+// 實際在獨立執行緒運作的渲染循環
+void RenderLoop() {
+    // 註冊視窗類別
+    WNDCLASSEXW wc = { sizeof(WNDCLASSEXW), CS_HREDRAW | CS_VREDRAW, WndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, L"XUANS_Overlay", nullptr };
+    RegisterClassExW(&wc);
 
-extern "C" {
+    // 建立透明穿透選單視窗 (預設 1920x1080 全螢幕覆蓋)
+    g_hWnd = CreateWindowExW(
+        WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED,
+        L"XUANS_Overlay", L"XUANS Overlay Menu",
+        WS_POPUP,
+        0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN),
+        nullptr, nullptr, wc.hInstance, nullptr
+    );
 
-    // 1. 初始化並建立穿透選單視窗
-    __declspec(dllexport) bool InitOverlay(const char* windowTitle, int width, int height) {
-        std::cout << "[XUANS Native] 正在初始化 ImGui 渲染核心..." << std::endl;
+    if (!g_hWnd) return;
 
-        // 註冊視窗類別
-        WNDCLASSEXW wc = { sizeof(WNDCLASSEXW), CS_HREDRAW | CS_VREDRAW, WndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, L"XUANS_Overlay", nullptr };
-        RegisterClassExW(&wc);
+    // 設定背景全透明
+    SetLayeredWindowAttributes(g_hWnd, RGB(0, 0, 0), 255, LWA_COLORKEY);
+    MARGINS margins = { -1 };
+    DwmExtendFrameIntoClientArea(g_hWnd, &margins);
 
-        // 建立無邊框視窗
-        g_hWnd = CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED, // 頂層、滑鼠穿透、分層樣式
-            L"XUANS_Overlay", L"XUANS Overlay Menu",
-            WS_POPUP, // 無邊框
-            100, 100, width, height,
-            nullptr, nullptr, wc.hInstance, nullptr
-        );
+    // 初始化 OpenGL 渲染
+    PIXELFORMATDESCRIPTOR pfd = { sizeof(PIXELFORMATDESCRIPTOR), 1, PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER, PFD_TYPE_RGBA, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 0, 0, PFD_MAIN_PLANE, 0, 0, 0, 0 };
+    g_hDC = GetDC(g_hWnd);
+    int pixelFormat = ChoosePixelFormat(g_hDC, &pfd);
+    SetPixelFormat(g_hDC, pixelFormat, &pfd);
+    g_hRC = wglCreateContext(g_hDC);
+    wglMakeCurrent(g_hDC, g_hRC);
 
-        if (!g_hWnd) return false;
+    ShowWindow(g_hWnd, SW_SHOWDEFAULT);
+    UpdateWindow(g_hWnd);
 
-        // 設定透明色標 (實現全視窗穿透背景)
-        SetLayeredWindowAttributes(g_hWnd, RGB(0, 0, 0), 255, LWA_COLORKEY);
+    // 初始化 ImGui
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGui::StyleColorsDark();
+    ImGui_ImplWin32_Init(g_hWnd);
+    ImGui_ImplOpenGL3_Init("#version 130");
 
-        // 啟用 DWM 視窗模糊/全黑穿透拓展
-        MARGINS margins = { -1 };
-        DwmExtendFrameIntoClientArea(g_hWnd, &margins);
+    g_Running = true;
 
-        // 初始化 OpenGL 渲染環境
-        PIXELFORMATDESCRIPTOR pfd = { sizeof(PIXELFORMATDESCRIPTOR), 1, PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER, PFD_TYPE_RGBA, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 0, 0, PFD_MAIN_PLANE, 0, 0, 0, 0 };
-        g_hDC = GetDC(g_hWnd);
-        int pixelFormat = ChoosePixelFormat(g_hDC, &pfd);
-        SetPixelFormat(g_hDC, pixelFormat, &pfd);
-        g_hRC = wglCreateContext(g_hDC);
-        wglMakeCurrent(g_hDC, g_hRC);
-
-        // 顯示視窗
-        ShowWindow(g_hWnd, SW_SHOWDEFAULT);
-        UpdateWindow(g_hWnd);
-
-        // 初始化 Dear ImGui 上下文
-        IMGUI_CHECKVERSION();
-        ImGui::CreateContext();
-        ImGuiIO& io = ImGui::GetIO(); (void)io;
-        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard; // 啟用鍵盤導覽
-
-        // 設定 ImGui 視覺主題 (酷炫黑)
-        ImGui::StyleColorsDark();
-
-        // 綁定平台與渲染器後台
-        ImGui_ImplWin32_Init(g_hWnd);
-        ImGui_ImplOpenGL3_Init("#version 130");
-
-        g_Running = true;
-        return true;
-    }
-
-    // 2. 執行主渲染循環 (Python 通常在一個 Thread 裡死循環呼叫此函式)
-    __declspec(dllexport) void RenderFrame() {
-        if (!g_Running) return;
-
+    // 主渲染死循環
+    while (g_Running) {
         MSG msg;
         while (PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE)) {
             TranslateMessage(&msg);
             DispatchMessage(&msg);
-            if (msg.message == WM_QUIT) g_Running = false;
         }
 
-        // 開始新的一幀
+        // 開始繪製新的一幀
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
 
-        // ---------------------------------------------------------
-        // 這裡就是渲染你硬核介面的地方！
-        // ---------------------------------------------------------
+        // 畫布層 (就算選單隱藏，這層依然可以畫透視框/準心)
         ImGui::SetNextWindowPos(ImGui::GetMainViewport()->Pos);
         ImGui::SetNextWindowSize(ImGui::GetMainViewport()->Size);
-        
-        // 建立一個不帶背景的透明底板視窗畫布
         ImGui::Begin("Canvas", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoInputs);
         
-        // 範例：繪製準心或文字在畫面上 (測試用)
-        ImGui::GetWindowDrawList()->AddCircle(ImVec2(960, 540), 10.0f, IM_COL32(255, 0, 0, 255), 12, 2.0f);
+        // 畫一個紅色的測試中心準心
+        float centerX = GetSystemMetrics(SM_CXSCREEN) / 2.0f;
+        float centerY = GetSystemMetrics(SM_CYSCREEN) / 2.0f;
+        ImGui::GetWindowDrawList()->AddCircle(ImVec2(centerX, centerY), 8.0f, IM_COL32(255, 0, 0, 255), 12, 2.0f);
         
         ImGui::End();
 
-        // 獨立出的操作控制主選單
-        ImGui::Begin("XUANS 高級核心控制器", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
-        ImGui::Text("系統狀態: 核心正常注入 (FPS: 60)");
-        ImGui::Separator();
-        
-        static bool aiTrack = false;
-        ImGui::Checkbox("啟用 YOLO 視覺自動追蹤", &aiTrack);
-        
-        static float aimSpeed = 0.5f;
-        ImGui::SliderFloat("平滑度 (Smooth)", &aimSpeed, 0.1f, 1.0f, "%.1f");
+        // 只有在 g_ShowMenu 為 true 時才渲染 ImGui 主調試選單
+        if (g_ShowMenu) {
+            // 讓滑鼠可以點擊到選單上 (取消穿透)
+            SetWindowLong(g_hWnd, GWL_EXSTYLE, WS_EX_TOPMOST | WS_EX_LAYERED);
 
-        if (ImGui::Button("強行清空後台快取")) {
-            std::cout << "[C++] 正在清除記憶體特徵與快取..." << std::endl;
+            ImGui::Begin("XUANS 高級核心控制器", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+            ImGui::Text("核心狀態: 正常注入 (FPS: 60)");
+            ImGui::Separator();
+            
+            // 這裡改變狀態，Python 的 sync_data_task 會自動同步抓到！
+            ImGui::Checkbox("啟用 YOLO 視覺自動追蹤", &g_AimbotState);
+            
+            ImGui::End();
+        } else {
+            // 隱藏選單時，開啟滑鼠穿透狀態 (完全不卡滑鼠操作)
+            SetWindowLong(g_hWnd, GWL_EXSTYLE, WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED);
         }
-        
-        ImGui::End();
-        // ---------------------------------------------------------
 
-        // 渲染與交換緩衝區
+        // 渲染呈現
         ImGui::Render();
         glViewport(0, 0, (int)ImGui::GetMainViewport()->Size.x, (int)ImGui::GetMainViewport()->Size.y);
         glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
@@ -155,26 +135,49 @@ extern "C" {
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         
         SwapBuffers(g_hDC);
+        std::this_thread::sleep_for(std::chrono::milliseconds(16)); // 限制 FPS 在 60 左右
     }
 
-    // 3. 釋放資源並關閉選單
-    __declspec(dllexport) void ShutdownOverlay() {
-        std::cout << "[XUANS Native] 正在關閉並銷毀渲染核心..." << std::endl;
+    // 釋放資源
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplWin32_Shutdown();
+    ImGui::DestroyContext();
+    wglMakeCurrent(nullptr, nullptr);
+    wglDeleteContext(g_hRC);
+    ReleaseDC(g_hWnd, g_hDC);
+    DestroyWindow(g_hWnd);
+    UnregisterClassW(L"XUANS_Overlay", GetModuleHandle(nullptr));
+}
+
+// =================================================================
+// 🚀 完美對齊 Python ctypes 期待的匯出接口
+// =================================================================
+
+extern "C" {
+
+    // 1. 對應 Python 的 overlay_lib.StartOverlay()
+    __declspec(dllexport) void StartOverlay() {
+        if (g_Running) return;
+        std::cout << "[XUANS Native] 收到啟動訊號，正在開闢獨立執行緒建立渲染視窗..." << std::endl;
+        g_RenderThread = std::thread(RenderLoop);
+        g_RenderThread.detach(); // 放行獨立運作
+    }
+
+    // 2. 對應 Python 的 overlay_lib.StopOverlay()
+    __declspec(dllexport) void StopOverlay() {
+        if (!g_Running) return;
+        std::cout << "[XUANS Native] 收到關閉訊號，正在安全卸載核心..." << std::endl;
         g_Running = false;
-        
-        ImGui_ImplOpenGL3_Shutdown();
-        ImGui_ImplWin32_Shutdown();
-        ImGui::DestroyContext();
-
-        wglMakeCurrent(nullptr, nullptr);
-        wglDeleteContext(g_hRC);
-        ReleaseDC(g_hWnd, g_hDC);
-        DestroyWindow(g_hWnd);
-        UnregisterClassW(L"XUANS_Overlay", GetModuleHandle(nullptr));
     }
 
-    // 4. 提供給 Python 檢查視窗是否還在運行
-    __declspec(dllexport) bool IsRunning() {
-        return g_Running;
+    // 3. 對應 Python 的 overlay_lib.ToggleMenu(menu_visible)
+    __declspec(dllexport) void ToggleMenu(bool visible) {
+        g_ShowMenu = visible;
+        std::cout << "[XUANS Native] 外部選單顯示切換為: " << (visible ? "顯示" : "隱藏") << std::endl;
+    }
+
+    // 4. 對應 Python 的 overlay_lib.GetAimbotState()
+    __declspec(dllexport) bool GetAimbotState() {
+        return g_AimbotState;
     }
 }
