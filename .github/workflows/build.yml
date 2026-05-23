@@ -17,7 +17,7 @@ jobs:
 
       - name: Compile DLL
         run: |
-          cl /LD /O2 -Iimgui 1.cpp imgui/imgui.cpp imgui/imgui_draw.cpp imgui/imgui_widgets.cpp imgui/imgui_tables.cpp imgui/imgui_impl_win32.cpp imgui/imgui_impl_opengl3.cpp /Fe:liboverlay.dll /EHsc
+          cl /utf-8 /LD /O2 -Iimgui 1.cpp imgui/imgui.cpp imgui/imgui_draw.cpp imgui/imgui_widgets.cpp imgui/imgui_tables.cpp imgui/imgui_impl_win32.cpp imgui/imgui_impl_opengl3.cpp /Fe:liboverlay.dll /EHsc
         
       - name: Upload DLL Artifact
         uses: actions/upload-artifact@v4
