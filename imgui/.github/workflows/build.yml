@@ -1,0 +1,52 @@
+name: Build Native Libraries
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup MSVC Compiler
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Compile DLL
+        run: |
+          cl /LD /O2 1.cpp imgui/imgui.cpp imgui/imgui_draw.cpp imgui/imgui_widgets.cpp imgui/imgui_tables.cpp imgui/imgui_impl_win32.cpp imgui/imgui_impl_opengl3.cpp /Fe:liboverlay.dll /EHsc
+        
+      - name: Upload DLL Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-dll
+          path: liboverlay.dll
+
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r25c
+
+      - name: Compile Android SO
+        run: |
+          mkdir -p android_libs/arm64-v8a
+          mkdir -p android_libs/armeabi-v7a
+          TOOLCHAIN=$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
+          
+          $TOOLCHAIN/aarch64-linux-android33-clang++ -shared -O2 1.cpp imgui/imgui.cpp imgui/imgui_draw.cpp imgui/imgui_widgets.cpp imgui/imgui_tables.cpp -o android_libs/arm64-v8a/liboverlay.so -landroid -lEGL -lGLESv3 -static-openmp
+          $TOOLCHAIN/armv7a-linux-androideabi33-clang++ -shared -O2 1.cpp imgui/imgui.cpp imgui/imgui_draw.cpp imgui/imgui_widgets.cpp imgui/imgui_tables.cpp -o android_libs/armeabi-v7a/liboverlay.so -landroid -lEGL -lGLESv3 -static-openmp
+
+      - name: Upload SO Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-so
+          path: android_libs/
