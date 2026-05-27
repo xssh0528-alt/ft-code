@@ -55,31 +55,32 @@ void RenderLoop() {
     int pixelFormat = ChoosePixelFormat(g_hDC, &pfd);
     SetPixelFormat(g_hDC, pixelFormat, &pfd);
     g_hRC = wglCreateContext(g_hDC);
+    
+    // 🎯 安全防護 1：在獨立執行緒內強制繫結當前 OpenGL 上下文
     wglMakeCurrent(g_hDC, g_hRC);
 
     ShowWindow(g_hWnd, SW_SHOWDEFAULT);
     UpdateWindow(g_hWnd);
 
+    // 🎯 安全防護 2：嚴格按照 ImGui 官方建議順序建立 Context 與載入主題
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     
-    // 🎯 換裝：改為極簡白色調主題
-    ImGui::StyleColorsLight();
+    ImGui::StyleColorsLight(); // 換成亮色主題
     
-    // 蘋果風格圓角微調
+    // 蘋果風格高級感樣式微調
     ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowRounding = 12.0f;     // 優雅大圓角
-    style.FrameRounding = 6.0f;       // 輸入框/按鈕圓角
+    style.WindowRounding = 12.0f;     
+    style.FrameRounding = 6.0f;       
     style.PopupRounding = 8.0f;
     style.ScrollbarRounding = 10.0f;
     style.GrabRounding = 6.0f;
-    style.WindowBorderSize = 0.0f;    // 去掉生硬的邊框
+    style.WindowBorderSize = 0.0f;    
     
-    // 調整白色主題下的文字與標題列顏色，使其更具 Mac 高級灰質感
     style.Colors[ImGuiCol_TitleBg]          = ImVec4(0.94f, 0.94f, 0.94f, 1.00f);
     style.Colors[ImGuiCol_TitleBgActive]    = ImVec4(0.94f, 0.94f, 0.94f, 1.00f);
     style.Colors[ImGuiCol_WindowBg]         = ImVec4(0.98f, 0.98f, 0.98f, 1.00f);
-    style.Colors[ImGuiCol_CheckMark]        = ImVec4(0.00f, 0.48f, 1.00f, 1.00f); // 蘋果藍
+    style.Colors[ImGuiCol_CheckMark]        = ImVec4(0.00f, 0.48f, 1.00f, 1.00f); 
 
     ImGuiIO& io = ImGui::GetIO();
     char fontPath[MAX_PATH];
@@ -92,6 +93,10 @@ void RenderLoop() {
         io.Fonts->AddFontFromFileTTF(fontPath, 18.0f, nullptr, io.Fonts->GetGlyphRangesChineseFull());
     }
 
+    // 🎯 安全防護 3：確保 Context 建立完成後，再點火初始化平台與後台
+    ImGui_ImplWin32_Init(g_hWnd);
+    ImGui_ImplOpenGL3_Init("#version 130");
+
     g_Running = true;
 
     while (g_Running) {
@@ -100,6 +105,9 @@ void RenderLoop() {
             TranslateMessage(&msg);
             DispatchMessage(&msg);
         }
+
+        // 刷新執行緒上下文繫結，防止被系統搶佔
+        wglMakeCurrent(g_hDC, g_hRC);
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplWin32_NewFrame();
@@ -111,17 +119,17 @@ void RenderLoop() {
         ImGui::Begin("Canvas", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoInputs);
         float centerX = GetSystemMetrics(SM_CXSCREEN) / 2.0f;
         float centerY = GetSystemMetrics(SM_CYSCREEN) / 2.0f;
-        ImGui::GetWindowDrawList()->AddCircle(ImVec2(centerX, centerY), 8.0f, IM_COL32(255, 69, 58, 255), 12, 2.0f); // 換成蘋果紅準心
+        ImGui::GetWindowDrawList()->AddCircle(ImVec2(centerX, centerY), 8.0f, IM_COL32(255, 69, 58, 255), 12, 2.0f); 
         ImGui::End();
 
         // 控制選單層
         if (g_ShowMenu) {
             SetWindowLong(g_hWnd, GWL_EXSTYLE, WS_EX_TOPMOST | WS_EX_LAYERED);
             
-            // 使用 NoTitleBar 隱藏原本 Windows 醜陋的標題欄，我們用代碼自己畫 Mac 紅綠燈
+            // 隱藏原本生硬的標題欄
             ImGui::Begin(u8"XUANS 高級核心控制器", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar);
             
-            // 🎯 手動繪製蘋果紅綠燈標題列
+            // 🎯 修正：必須在 ImGui::Begin 之後獲取對齊的 DrawList
             ImDrawList* draw_list = ImGui::GetWindowDrawList();
             ImVec2 pos = ImGui::GetWindowPos();
             
@@ -130,16 +138,15 @@ void RenderLoop() {
             float startY = pos.y + 22.0f;
             float spacing = 18.0f;
 
-            // 畫紅綠燈三個圓點 (iOS/Mac 精準配色)
-            draw_list->AddCircleFilled(ImVec2(startX, startY), radius, IM_COL32(255, 95, 86, 255));     // 紅 (關閉)
-            draw_list->AddCircleFilled(ImVec2(startX + spacing, startY), radius, IM_COL32(255, 189, 46, 255)); // 黃 (最小化)
-            draw_list->AddCircleFilled(ImVec2(startX + spacing * 2, startY), radius, IM_COL32(39, 201, 63, 255)); // 綠 (最大化)
+            // 晶瑩剔透的蘋果經典紅綠燈 (關閉、最小化、最大化)
+            draw_list->AddCircleFilled(ImVec2(startX, startY), radius, IM_COL32(255, 95, 86, 255));     
+            draw_list->AddCircleFilled(ImVec2(startX + spacing, startY), radius, IM_COL32(255, 189, 46, 255)); 
+            draw_list->AddCircleFilled(ImVec2(startX + spacing * 2, startY), radius, IM_COL32(39, 201, 63, 255)); 
 
-            // 補上標題文字（往右挪開不擋到紅綠燈）
             ImGui::SetCursorPos(ImVec2(80.0f, 12.0f));
             ImGui::TextDisabled(u8"XUANS 高級核心控制器");
             
-            ImGui::SetCursorPosY(40.0f); // 把主要內容往下推
+            ImGui::SetCursorPosY(40.0f); 
             ImGui::Separator();
             
             ImGui::Text(u8"核心狀態: 正常注入 (FPS: 60)");
