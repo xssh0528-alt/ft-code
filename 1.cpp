@@ -18,6 +18,11 @@ bool g_Running = false;
 bool g_ShowMenu = true;       
 bool g_AimbotState = false;   
 
+// 新增一些測試用的變數，讓分頁內容更豐富
+bool g_EspBox = false;
+bool g_EspLine = false;
+float g_AimbotFov = 90.0f;
+
 std::thread g_RenderThread;   
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -56,31 +61,37 @@ void RenderLoop() {
     SetPixelFormat(g_hDC, pixelFormat, &pfd);
     g_hRC = wglCreateContext(g_hDC);
     
-    // 🎯 安全防護 1：在獨立執行緒內強制繫結當前 OpenGL 上下文
     wglMakeCurrent(g_hDC, g_hRC);
 
     ShowWindow(g_hWnd, SW_SHOWDEFAULT);
     UpdateWindow(g_hWnd);
 
-    // 🎯 安全防護 2：嚴格按照 ImGui 官方建議順序建立 Context 與載入主題
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     
-    ImGui::StyleColorsLight(); // 換成亮色主題
+    ImGui::StyleColorsLight(); // 保持亮色主題
     
-    // 蘋果風格高級感樣式微調
     ImGuiStyle& style = ImGui::GetStyle();
     style.WindowRounding = 12.0f;     
     style.FrameRounding = 6.0f;       
     style.PopupRounding = 8.0f;
     style.ScrollbarRounding = 10.0f;
     style.GrabRounding = 6.0f;
+    style.TabRounding = 6.0f;         // ✨ 新增：頁籤圓角
     style.WindowBorderSize = 0.0f;    
     
     style.Colors[ImGuiCol_TitleBg]          = ImVec4(0.94f, 0.94f, 0.94f, 1.00f);
     style.Colors[ImGuiCol_TitleBgActive]    = ImVec4(0.94f, 0.94f, 0.94f, 1.00f);
     style.Colors[ImGuiCol_WindowBg]         = ImVec4(0.98f, 0.98f, 0.98f, 1.00f);
-    style.Colors[ImGuiCol_CheckMark]        = ImVec4(0.00f, 0.48f, 1.00f, 1.00f); 
+    style.Colors[ImGuiCol_CheckMark]        = ImVec4(0.00f, 0.48f, 1.00f, 1.00f); // 蘋果藍
+    style.Colors[ImGuiCol_SliderGrab]       = ImVec4(0.00f, 0.48f, 1.00f, 1.00f);
+    
+    // ✨ 調整頁籤選中與未選中的果味配色
+    style.Colors[ImGuiCol_Tab]              = ImVec4(0.90f, 0.90f, 0.92f, 1.00f);
+    style.Colors[ImGuiCol_TabHovered]       = ImVec4(0.84f, 0.84f, 0.86f, 1.00f);
+    style.Colors[ImGuiCol_TabActive]        = ImVec4(0.00f, 0.48f, 1.00f, 1.00f); // 選中時變成蘋果藍
+    style.Colors[ImGuiCol_TabUnfocused]     = ImVec4(0.90f, 0.90f, 0.92f, 1.00f);
+    style.Colors[ImGuiCol_TabUnfocusedActive] = ImVec4(0.94f, 0.94f, 0.94f, 1.00f);
 
     ImGuiIO& io = ImGui::GetIO();
     char fontPath[MAX_PATH];
@@ -93,7 +104,6 @@ void RenderLoop() {
         io.Fonts->AddFontFromFileTTF(fontPath, 18.0f, nullptr, io.Fonts->GetGlyphRangesChineseFull());
     }
 
-    // 🎯 安全防護 3：確保 Context 建立完成後，再點火初始化平台與後台
     ImGui_ImplWin32_Init(g_hWnd);
     ImGui_ImplOpenGL3_Init("#version 130");
 
@@ -106,7 +116,6 @@ void RenderLoop() {
             DispatchMessage(&msg);
         }
 
-        // 刷新執行緒上下文繫結，防止被系統搶佔
         wglMakeCurrent(g_hDC, g_hRC);
 
         ImGui_ImplOpenGL3_NewFrame();
@@ -119,26 +128,30 @@ void RenderLoop() {
         ImGui::Begin("Canvas", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoInputs);
         float centerX = GetSystemMetrics(SM_CXSCREEN) / 2.0f;
         float centerY = GetSystemMetrics(SM_CYSCREEN) / 2.0f;
-        ImGui::GetWindowDrawList()->AddCircle(ImVec2(centerX, centerY), 8.0f, IM_COL32(255, 69, 58, 255), 12, 2.0f); 
+        
+        // 如果自瞄開啟，準心外圍多畫一個 FOV 圈圈
+        if (g_AimbotState) {
+            ImGui::GetWindowDrawList()->AddCircle(ImVec2(centerX, centerY), g_AimbotFov, IM_COL32(0, 122, 255, 100), 32, 1.0f);
+        }
+        ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(centerX, centerY), 4.0f, IM_COL32(255, 69, 58, 255)); 
         ImGui::End();
 
         // 控制選單層
         if (g_ShowMenu) {
             SetWindowLong(g_hWnd, GWL_EXSTYLE, WS_EX_TOPMOST | WS_EX_LAYERED);
             
-            // 隱藏原本生硬的標題欄
-            ImGui::Begin(u8"XUANS 高級核心控制器", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar);
+            // 為了不讓內容太擠，我們稍微設定一下選單的固定寬度
+            ImGui::SetNextWindowSize(ImVec2(420, 280), ImGuiCond_FirstUseEver);
+            ImGui::Begin(u8"XUANS 高級核心控制器", nullptr, ImGuiWindowFlags_NoTitleBar);
             
-            // 🎯 修正：必須在 ImGui::Begin 之後獲取對齊的 DrawList
+            // 手動繪製蘋果紅綠燈
             ImDrawList* draw_list = ImGui::GetWindowDrawList();
             ImVec2 pos = ImGui::GetWindowPos();
-            
             float radius = 6.0f;
             float startX = pos.x + 20.0f;
             float startY = pos.y + 22.0f;
             float spacing = 18.0f;
 
-            // 晶瑩剔透的蘋果經典紅綠燈 (關閉、最小化、最大化)
             draw_list->AddCircleFilled(ImVec2(startX, startY), radius, IM_COL32(255, 95, 86, 255));     
             draw_list->AddCircleFilled(ImVec2(startX + spacing, startY), radius, IM_COL32(255, 189, 46, 255)); 
             draw_list->AddCircleFilled(ImVec2(startX + spacing * 2, startY), radius, IM_COL32(39, 201, 63, 255)); 
@@ -149,10 +162,49 @@ void RenderLoop() {
             ImGui::SetCursorPosY(40.0f); 
             ImGui::Separator();
             
-            ImGui::Text(u8"核心狀態: 正常注入 (FPS: 60)");
-            ImGui::Separator();
-            
-            ImGui::Checkbox(u8"啟用 YOLO 視覺自動追蹤", &g_AimbotState);
+            // 🎯 ✨ 核心亮點：開始分頁欄組件
+            if (ImGui::BeginTabBar("XUANS_TabBar", ImGuiTabBarFlags_None)) {
+                
+                // ─── 第一頁：核心自瞄 ───
+                if (ImGui::BeginTabItem(u8"主控自瞄")) {
+                    ImGui::Dummy(ImVec2(0.0f, 10.0f)); // 空白間距
+                    ImGui::Text(u8"核心狀態: 正常注入 (FPS: 60)");
+                    ImGui::Separator();
+                    
+                    ImGui::Checkbox(u8"啟用 YOLO 視覺自動追蹤", &g_AimbotState);
+                    
+                    // 只有在開啟自瞄時才顯示 FOV 滑桿
+                    if (g_AimbotState) {
+                        ImGui::SliderFloat(u8"追蹤範圍 (FOV)", &g_AimbotFov, 30.0f, 300.0f, "%.0f px");
+                    }
+                    
+                    ImGui::EndTabItem();
+                }
+                
+                // ─── 第二頁：視覺透視 ───
+                if (ImGui::BeginTabItem(u8"視覺透視")) {
+                    ImGui::Dummy(ImVec2(0.0f, 10.0f));
+                    ImGui::Checkbox(u8"顯示目標方框 (2D Box)", &g_EspBox);
+                    ImGui::Checkbox(u8"顯示追蹤射線 (Snaplines)", &g_EspLine);
+                    
+                    ImGui::EndTabItem();
+                }
+                
+                // ─── 第三頁：系統設置 ───
+                if (ImGui::BeginTabItem(u8"系統設置")) {
+                    ImGui::Dummy(ImVec2(0.0f, 10.0f));
+                    ImGui::TextDisabled(u8"授權團隊: XUANS 開發團隊");
+                    ImGui::TextDisabled(u8"技術核心: Python 3.10 + C++ Native (OpenGL3)");
+                    
+                    if (ImGui::Button(u8"安全卸載核心")) {
+                        g_Running = false;
+                    }
+                    
+                    ImGui::EndTabItem();
+                }
+                
+                ImGui::EndTabBar(); // 結束分頁欄
+            }
             
             ImGui::End();
         } else {
