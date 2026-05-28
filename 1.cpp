@@ -3,6 +3,9 @@
 #include <GL/gl.h>
 #include <iostream>
 #include <thread>
+#include <atomic>
+#include <vector>
+#include <mutex>
 
 #include "imgui.h"
 #include "imgui_impl_win32.h"
@@ -11,31 +14,36 @@
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "opengl32.lib")
 
+// ─── 結構體定義：接收 YOLO 傳遞的目標 ───
+struct DetectedTarget {
+    float x, y, w, h;
+};
+
+// ─── 全域執行緒安全變數 ───
 HWND g_hWnd = nullptr;
 HDC g_hDC = nullptr;
 HGLRC g_hRC = nullptr;
-bool g_Running = false;
+
+std::atomic<bool> g_Running(false);
+std::atomic<bool> g_Initialized(false); 
+
 bool g_ShowMenu = true;       
 bool g_AimbotState = false;   
 
-// ─── 舊有與全新功能變數 ───
+// ─── 進階控制參數 ───
 bool g_EspBox = false;
 bool g_EspLine = false;
 float g_AimbotFov = 90.0f;
-
-// ✨ 新功能 1：平滑度參數 (預設 5.0f，數值越高越平緩防封)
 float g_AimbotSmooth = 5.0f; 
-
-// ✨ 新功能 2：鎖定部位 (0: 頭部, 1: 胸口, 2: 腹部)
 int g_TargetBone = 0; 
 const char* g_BoneNames[] = { u8"骨骼: 頭部 (Head)", u8"骨骼: 胸口 (Chest)", u8"骨骼: 腹部 (Pelvis)" };
-
-// ✨ 新功能 3：透視方框顏色 (RGBA 陣列，預設為蘋果經典藍色)
 float g_BoxColor[4] = { 0.0f, 0.48f, 1.0f, 1.0f }; 
 
-// 記錄當前切換到哪一個分頁 (0: 主控, 1: 視覺, 2: 設置)
-int g_CurrentTab = 0; 
+// ─── YOLO 坐標共享快取 ───
+std::vector<DetectedTarget> g_DetectedTargets;
+std::mutex g_TargetMutex;
 
+int g_CurrentTab = 0; 
 std::thread g_RenderThread;   
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -62,7 +70,7 @@ void RenderLoop() {
         nullptr, nullptr, wc.hInstance, nullptr
     );
 
-    if (!g_hWnd) return;
+    if (!g_hWnd) { g_Running = false; return; }
 
     SetLayeredWindowAttributes(g_hWnd, RGB(0, 0, 0), 255, LWA_COLORKEY);
     MARGINS margins = { -1 };
@@ -73,11 +81,7 @@ void RenderLoop() {
     int pixelFormat = ChoosePixelFormat(g_hDC, &pfd);
     SetPixelFormat(g_hDC, pixelFormat, &pfd);
     g_hRC = wglCreateContext(g_hDC);
-    
     wglMakeCurrent(g_hDC, g_hRC);
-
-    ShowWindow(g_hWnd, SW_SHOWDEFAULT);
-    UpdateWindow(g_hWnd);
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -87,14 +91,9 @@ void RenderLoop() {
     style.WindowRounding = 12.0f;     
     style.FrameRounding = 6.0f;       
     style.PopupRounding = 8.0f;
-    style.ScrollbarRounding = 10.0f;
-    style.GrabRounding = 6.0f;
-    style.ChildRounding = 8.0f;       
     style.WindowBorderSize = 0.0f;    
     style.ChildBorderSize = 0.0f;     
     
-    style.Colors[ImGuiCol_TitleBg]          = ImVec4(0.94f, 0.94f, 0.94f, 1.00f);
-    style.Colors[ImGuiCol_TitleBgActive]    = ImVec4(0.94f, 0.94f, 0.94f, 1.00f);
     style.Colors[ImGuiCol_WindowBg]         = ImVec4(0.98f, 0.98f, 0.98f, 1.00f);
     style.Colors[ImGuiCol_CheckMark]        = ImVec4(0.00f, 0.48f, 1.00f, 1.00f); 
     style.Colors[ImGuiCol_SliderGrab]       = ImVec4(0.00f, 0.48f, 1.00f, 1.00f);
@@ -106,17 +105,12 @@ void RenderLoop() {
     char fontPath[MAX_PATH];
     GetWindowsDirectoryA(fontPath, MAX_PATH);
     strcat_s(fontPath, "\\Fonts\\msjh.ttc"); 
-    ImFont* font = io.Fonts->AddFontFromFileTTF(fontPath, 18.0f, nullptr, io.Fonts->GetGlyphRangesChineseFull());
-    if (font == nullptr) {
-        GetWindowsDirectoryA(fontPath, MAX_PATH);
-        strcat_s(fontPath, "\\Fonts\\mingliu.ttc");
-        io.Fonts->AddFontFromFileTTF(fontPath, 18.0f, nullptr, io.Fonts->GetGlyphRangesChineseFull());
-    }
+    io.Fonts->AddFontFromFileTTF(fontPath, 18.0f, nullptr, io.Fonts->GetGlyphRangesChineseFull());
 
     ImGui_ImplWin32_Init(g_hWnd);
     ImGui_ImplOpenGL3_Init("#version 130");
 
-    g_Running = true;
+    g_Initialized = true; 
 
     while (g_Running) {
         MSG msg;
@@ -126,163 +120,132 @@ void RenderLoop() {
         }
 
         wglMakeCurrent(g_hDC, g_hRC);
-
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
 
-        // 畫布層 (繪製中心準心與動態 FOV)
+        float screenW = (float)GetSystemMetrics(SM_CXSCREEN);
+        float screenH = (float)GetSystemMetrics(SM_CYSCREEN);
+        float centerX = screenW / 2.0f;
+        float centerY = screenH / 2.0f;
+
+        // ─── 畫布層：繪製中心點、FOV與 YOLO 動態追蹤視覺 ───
         ImGui::SetNextWindowPos(ImGui::GetMainViewport()->Pos);
         ImGui::SetNextWindowSize(ImGui::GetMainViewport()->Size);
         ImGui::Begin("Canvas", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoInputs);
-        float centerX = GetSystemMetrics(SM_CXSCREEN) / 2.0f;
-        float centerY = GetSystemMetrics(SM_CYSCREEN) / 2.0f;
         
+        ImDrawList* canvas_draw = ImGui::GetWindowDrawList();
+
         if (g_AimbotState) {
-            // 使用動態調整的 FOV 圓圈
-            ImGui::GetWindowDrawList()->AddCircle(ImVec2(centerX, centerY), g_AimbotFov, IM_COL32(0, 122, 255, 100), 32, 1.0f);
+            canvas_draw->AddCircle(ImVec2(centerX, centerY), g_AimbotFov, IM_COL32(0, 122, 255, 60), 32, 1.5f);
         }
-        // 中心固定紅點
-        ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(centerX, centerY), 4.0f, IM_COL32(255, 69, 58, 255)); 
+        canvas_draw->AddCircleFilled(ImVec2(centerX, centerY), 3.5f, IM_COL32(255, 69, 58, 255)); 
+
+        // ✨ 核心渲染邏輯：實時繪製 YOLO 傳過來的物體
+        {
+            std::lock_guard<std::mutex> lock(g_TargetMutex);
+            ImU32 box_color_u32 = IM_COL32((int)(g_BoxColor[0]*255), (int)(g_BoxColor[1]*255), (int)(g_BoxColor[2]*255), (int)(g_BoxColor[3]*255));
+            
+            for (const auto& target : g_DetectedTargets) {
+                // 繪製 2D 方框
+                if (g_EspBox) {
+                    canvas_draw->AddRect(
+                        ImVec2(target.x - target.w / 2.0f, target.y - target.h / 2.0f),
+                        ImVec2(target.x + target.w / 2.0f, target.y + target.h / 2.0f),
+                        box_color_u32, 0.0f, 0, 2.0f
+                    );
+                }
+                // 繪製追蹤射線 (從螢幕底部發射到目標腳底/中心)
+                if (g_EspLine) {
+                    canvas_draw->AddLine(
+                        ImVec2(centerX, screenH),
+                        ImVec2(target.x, target.y + target.h / 2.0f),
+                        box_color_u32, 1.5f
+                    );
+                }
+            }
+        }
         ImGui::End();
 
-        // 控制選單層
+        // ─── 控制選單層 ───
         if (g_ShowMenu) {
             SetWindowLong(g_hWnd, GWL_EXSTYLE, WS_EX_TOPMOST | WS_EX_LAYERED);
-            
-            // 隨著功能變多，稍微加高視窗到 360
             ImGui::SetNextWindowSize(ImVec2(520, 360), ImGuiCond_FirstUseEver);
             ImGui::Begin(u8"XUANS 高級核心控制器", nullptr, ImGuiWindowFlags_NoTitleBar);
             
-            // 蘋果紅綠燈
             ImDrawList* draw_list = ImGui::GetWindowDrawList();
             ImVec2 pos = ImGui::GetWindowPos();
-            float radius = 6.0f;
-            float startX = pos.x + 20.0f;
-            float startY = pos.y + 22.0f;
-            float spacing = 18.0f;
-
-            draw_list->AddCircleFilled(ImVec2(startX, startY), radius, IM_COL32(255, 95, 86, 255));     
-            draw_list->AddCircleFilled(ImVec2(startX + spacing, startY), radius, IM_COL32(255, 189, 46, 255)); 
-            draw_list->AddCircleFilled(ImVec2(startX + spacing * 2, startY), radius, IM_COL32(39, 201, 63, 255)); 
+            draw_list->AddCircleFilled(ImVec2(pos.x + 20.0f, pos.y + 22.0f), 6.0f, IM_COL32(255, 95, 86, 255));     
+            draw_list->AddCircleFilled(ImVec2(pos.x + 38.0f, pos.y + 22.0f), 6.0f, IM_COL32(255, 189, 46, 255)); 
+            draw_list->AddCircleFilled(ImVec2(pos.x + 56.0f, pos.y + 22.0f), 6.0f, IM_COL32(39, 201, 63, 255)); 
 
             ImGui::SetCursorPos(ImVec2(80.0f, 12.0f));
             ImGui::TextDisabled(u8"XUANS 高級核心控制器");
+            ImGui::SetCursorPosY(45.0f); ImGui::Separator();
             
-            ImGui::SetCursorPosY(45.0f); 
-            ImGui::Separator();
-            
-            // ─── 左側邊欄導航 ───
             ImGui::BeginChild("Sidebar", ImVec2(125, 0), false, ImGuiWindowFlags_NoBackground);
             ImGui::Dummy(ImVec2(0.0f, 5.0f));
-            
             int pushedColors = 0;
 
-            // 頁籤 1
-            if (g_CurrentTab == 0) {
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.00f, 0.48f, 1.00f, 1.00f)); 
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.00f, 1.00f, 1.00f, 1.00f));
-                pushedColors = 2;
-            }
+            if (g_CurrentTab == 0) { ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.00f, 0.48f, 1.00f, 1.00f)); ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.00f, 1.00f, 1.00f, 1.00f)); pushedColors = 2; }
             if (ImGui::Button(u8"主控自瞄", ImVec2(115, 40))) g_CurrentTab = 0;
             if (pushedColors > 0) { ImGui::PopStyleColor(pushedColors); pushedColors = 0; }
-            
             ImGui::Dummy(ImVec2(0.0f, 5.0f));
             
-            // 頁籤 2
-            if (g_CurrentTab == 1) {
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.00f, 0.48f, 1.00f, 1.00f));
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.00f, 1.00f, 1.00f, 1.00f));
-                pushedColors = 2;
-            }
+            if (g_CurrentTab == 1) { ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.00f, 0.48f, 1.00f, 1.00f)); ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.00f, 1.00f, 1.00f, 1.00f)); pushedColors = 2; }
             if (ImGui::Button(u8"視覺透視", ImVec2(115, 40))) g_CurrentTab = 1;
             if (pushedColors > 0) { ImGui::PopStyleColor(pushedColors); pushedColors = 0; }
-            
             ImGui::Dummy(ImVec2(0.0f, 5.0f));
             
-            // 頁籤 3
-            if (g_CurrentTab == 2) {
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.00f, 0.48f, 1.00f, 1.00f));
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.00f, 1.00f, 1.00f, 1.00f));
-                pushedColors = 2;
-            }
+            if (g_CurrentTab == 2) { ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.00f, 0.48f, 1.00f, 1.00f)); ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.00f, 1.00f, 1.00f, 1.00f)); pushedColors = 2; }
             if (ImGui::Button(u8"系統設置", ImVec2(115, 40))) g_CurrentTab = 2;
             if (pushedColors > 0) { ImGui::PopStyleColor(pushedColors); pushedColors = 0; }
-            
             ImGui::EndChild();
             
             ImGui::SameLine(0.0f, 15.0f);
-            
-            // ─── 右側主要內容主體 ───
             ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
             ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.90f, 0.90f, 0.92f, 1.00f)); 
-            
             ImGui::BeginChild("ContentBody", ImVec2(0, 0), true, ImGuiWindowFlags_NoBackground);
             ImGui::Dummy(ImVec2(0.0f, 2.0f));
             
-            // ─── 分頁 1 內容：自瞄進階控制 ───
             if (g_CurrentTab == 0) {
                 ImGui::Text(u8"核心狀態: 正常注入 (FPS: 60)");
-                ImGui::Separator();
-                ImGui::Dummy(ImVec2(0.0f, 5.0f));
-                
+                ImGui::Separator(); ImGui::Dummy(ImVec2(0.0f, 5.0f));
                 ImGui::Checkbox(u8"啟用 YOLO 視覺自動追蹤", &g_AimbotState);
-                
                 if (g_AimbotState) {
                     ImGui::Dummy(ImVec2(0.0f, 5.0f));
                     ImGui::SliderFloat(u8"追蹤範圍 (FOV)", &g_AimbotFov, 30.0f, 300.0f, "%.0f px");
-                    
-                    // ✨ 新增 UI：平滑度滑桿
                     ImGui::SliderFloat(u8"滑動平滑度 (Smooth)", &g_AimbotSmooth, 1.0f, 20.0f, "%.1f");
-                    
-                    // ✨ 新增 UI：部位選擇下拉選單
                     ImGui::SetNextItemWidth(180.0f);
                     if (ImGui::BeginCombo(u8"瞄準部位", g_BoneNames[g_TargetBone])) {
                         for (int n = 0; n < 3; n++) {
-                            bool is_selected = (g_TargetBone == n);
-                            if (ImGui::Selectable(g_BoneNames[n], is_selected))
-                                g_TargetBone = n;
-                            if (is_selected)
-                                ImGui::SetItemDefaultFocus();
+                            if (ImGui::Selectable(g_BoneNames[n], g_TargetBone == n)) g_TargetBone = n;
                         }
                         ImGui::EndCombo();
                     }
                 }
             } 
-            // ─── 分頁 2 內容：視覺與調色盤 ───
             else if (g_CurrentTab == 1) {
                 ImGui::Text(u8"視覺外觀覆蓋設定");
-                ImGui::Separator();
-                ImGui::Dummy(ImVec2(0.0f, 5.0f));
-                
+                ImGui::Separator(); ImGui::Dummy(ImVec2(0.0f, 5.0f));
                 ImGui::Checkbox(u8"顯示目標方框 (2D Box)", &g_EspBox);
                 ImGui::Checkbox(u8"顯示追蹤射線 (Snaplines)", &g_EspLine);
-                
-                // ✨ 新增 UI：如果開啟方框透視，動態展現果味調色盤
                 if (g_EspBox) {
-                    ImGui::Dummy(ImVec2(0.0f, 5.0f));
-                    ImGui::Text(u8"外框顏色自訂:");
-                    ImGui::SameLine();
+                    ImGui::Dummy(ImVec2(0.0f, 5.0f)); ImGui::Text(u8"外框顏色自訂:"); ImGui::SameLine();
                     ImGui::ColorEdit4(u8"##BoxColorPicker", g_BoxColor, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
                 }
             } 
-            // ─── 分頁 3 內容：系統設置 ───
             else if (g_CurrentTab == 2) {
                 ImGui::Text(u8"XS 系統核心資訊");
-                ImGui::Separator();
-                ImGui::Dummy(ImVec2(0.0f, 5.0f));
+                ImGui::Separator(); ImGui::Dummy(ImVec2(0.0f, 5.0f));
                 ImGui::TextDisabled(u8"授權團隊: XUANS 開發團隊");
                 ImGui::TextDisabled(u8"技術核心: C++ Native (OpenGL3)");
                 ImGui::Dummy(ImVec2(0.0f, 15.0f));
-                if (ImGui::Button(u8"安全卸載核心", ImVec2(140, 35))) {
-                    g_Running = false;
-                }
+                if (ImGui::Button(u8"安全卸載核心", ImVec2(140, 35))) g_Running = false;
             }
             
             ImGui::EndChild();
-            ImGui::PopStyleColor(); 
-            ImGui::PopStyleVar();   
-            
+            ImGui::PopStyleColor(); ImGui::PopStyleVar();   
             ImGui::End();
         } else {
             SetWindowLong(g_hWnd, GWL_EXSTYLE, WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED);
@@ -293,33 +256,38 @@ void RenderLoop() {
         glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-        
         SwapBuffers(g_hDC);
         std::this_thread::sleep_for(std::chrono::milliseconds(16));
     }
 
-    ImGui_ImplOpenGL3_Shutdown();
-    ImGui_ImplWin32_Shutdown();
-    ImGui::DestroyContext();
-    wglMakeCurrent(nullptr, nullptr);
-    wglDeleteContext(g_hRC);
-    ReleaseDC(g_hWnd, g_hDC);
-    DestroyWindow(g_hWnd);
+    ImGui_ImplOpenGL3_Shutdown(); ImGui_ImplWin32_Shutdown(); ImGui::DestroyContext();
+    wglMakeCurrent(nullptr, nullptr); wglDeleteContext(g_hRC); ReleaseDC(g_hWnd, g_hDC); DestroyWindow(g_hWnd);
     UnregisterClassW(L"XUANS_Overlay", GetModuleHandle(nullptr));
 }
 
-// ─── 導出 C 介面函數給 Python 連接 ───
+// ─── 嚴格的 C 導出介面 ───
 extern "C" {
     __declspec(dllexport) void StartOverlay() {
         if (g_Running) return;
+        g_Running = true; g_Initialized = false; 
         g_RenderThread = std::thread(RenderLoop);
         g_RenderThread.detach();
     }
-    __declspec(dllexport) void StopOverlay() { if (g_Running) g_Running = false; }
-    __declspec(dllexport) void ToggleMenu(bool visible) { g_ShowMenu = visible; }
+    __declspec(dllexport) void StopOverlay() { g_Running = false; g_Initialized = false; }
+    __declspec(dllexport) void ToggleMenu(bool visible) { if (g_Initialized) g_ShowMenu = visible; }
     __declspec(dllexport) bool GetAimbotState() { return g_AimbotState; }
-
-    // ✨ 新增導出接口：以便 Python 未來需要直接獲取平滑度和鎖定骨骼數據
+    __declspec(dllexport) float gGetAimbotFov() { return g_AimbotFov; } // ✨ 新增：獲取當前滑動條設定的 FOV
     __declspec(dllexport) float GetAimbotSmooth() { return g_AimbotSmooth; }
     __declspec(dllexport) int GetTargetBone() { return g_TargetBone; }
+    __declspec(dllexport) bool IsOverlayReady() { return g_Initialized.load(); }
+
+    // ✨ 關鍵核心函數：供 Python 實時傳入 YOLO 識別到的目標數據
+    __declspec(dllexport) void UpdateYoloTargets(float* x_arr, float* y_arr, float* w_arr, float* h_arr, int count) {
+        if (!g_Initialized) return;
+        std::lock_guard<std::mutex> lock(g_TargetMutex);
+        g_DetectedTargets.clear();
+        for (int i = 0; i < count; i++) {
+            g_DetectedTargets.push_back({ x_arr[i], y_arr[i], w_arr[i], h_arr[i] });
+        }
+    }
 }
