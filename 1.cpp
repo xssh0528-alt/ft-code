@@ -23,7 +23,7 @@ bool g_EspBox = false;
 bool g_EspLine = false;
 float g_AimbotFov = 90.0f;
 
-// 🎯 新增：用來記錄當前切換到哪一個分頁 (0: 主控, 1: 視覺, 2: 設置)
+// 記錄當前切換到哪一個分頁 (0: 主控, 1: 視覺, 2: 設置)
 int g_CurrentTab = 0; 
 
 std::thread g_RenderThread;   
@@ -80,14 +80,16 @@ void RenderLoop() {
     style.PopupRounding = 8.0f;
     style.ScrollbarRounding = 10.0f;
     style.GrabRounding = 6.0f;
+    style.ChildRounding = 8.0f;       // ✨ 新增：子視窗圓角設定
     style.WindowBorderSize = 0.0f;    
+    style.ChildBorderSize = 0.0f;     // 預設去掉子視窗生硬的框
     
     style.Colors[ImGuiCol_TitleBg]          = ImVec4(0.94f, 0.94f, 0.94f, 1.00f);
     style.Colors[ImGuiCol_TitleBgActive]    = ImVec4(0.94f, 0.94f, 0.94f, 1.00f);
     style.Colors[ImGuiCol_WindowBg]         = ImVec4(0.98f, 0.98f, 0.98f, 1.00f);
-    style.Colors[ImGuiCol_CheckMark]        = ImVec4(0.00f, 0.48f, 1.00f, 1.00f); // 蘋果藍
+    style.Colors[ImGuiCol_CheckMark]        = ImVec4(0.00f, 0.48f, 1.00f, 1.00f); 
     style.Colors[ImGuiCol_SliderGrab]       = ImVec4(0.00f, 0.48f, 1.00f, 1.00f);
-    style.Colors[ImGuiCol_Button]           = ImVec4(0.90f, 0.90f, 0.92f, 1.00f); // 預設按鈕淺灰
+    style.Colors[ImGuiCol_Button]           = ImVec4(0.92f, 0.92f, 0.95f, 1.00f); // 淺灰色 iOS 風格按鈕底色
     style.Colors[ImGuiCol_ButtonHovered]    = ImVec4(0.84f, 0.84f, 0.86f, 1.00f);
     style.Colors[ImGuiCol_ButtonActive]     = ImVec4(0.00f, 0.48f, 1.00f, 1.00f);
 
@@ -136,8 +138,7 @@ void RenderLoop() {
         if (g_ShowMenu) {
             SetWindowLong(g_hWnd, GWL_EXSTYLE, WS_EX_TOPMOST | WS_EX_LAYERED);
             
-            // 寬度稍微加寬到 500，給左側邊欄留出舒適空間
-            ImGui::SetNextWindowSize(ImVec2(500, 300), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize(ImVec2(500, 320), ImGuiCond_FirstUseEver);
             ImGui::Begin(u8"XUANS 高級核心控制器", nullptr, ImGuiWindowFlags_NoTitleBar);
             
             // 手動繪製蘋果紅綠燈
@@ -155,19 +156,17 @@ void RenderLoop() {
             ImGui::SetCursorPos(ImVec2(80.0f, 12.0f));
             ImGui::TextDisabled(u8"XUANS 高級核心控制器");
             
-            ImGui::SetCursorPosY(40.0f); 
+            ImGui::SetCursorPosY(45.0f); 
             ImGui::Separator();
             
-            // 🎯 ✨ 核心亮點：左側邊欄導航佈局
-            // 左側子視窗：寬度 120，高度填滿，不顯示邊框
-            ImGui::BeginChild("Sidebar", ImVec2(120, 0), false, ImGuiWindowFlags_NoBackground);
-            
+            // ─── 左側邊欄導航 ───
+            ImGui::BeginChild("Sidebar", ImVec2(125, 0), false, ImGuiWindowFlags_NoBackground);
             ImGui::Dummy(ImVec2(0.0f, 5.0f));
             
             // 頁籤 1 按鈕
-            if (g_CurrentTab == 0) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.00f, 0.48f, 1.00f, 1.00f)); // 選中變藍色
+            if (g_CurrentTab == 0) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.00f, 0.48f, 1.00f, 1.00f)); 
             if (g_CurrentTab == 0) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.00f, 1.00f, 1.00f, 1.00f));
-            if (ImGui::Button(u8" 🎯 主控自瞄 ", ImVec2(110, 40))) g_CurrentTab = 0;
+            if (ImGui::Button(u8" 🎯 主控自瞄 ", ImVec2(115, 40))) g_CurrentTab = 0;
             if (g_CurrentTab == 0) ImGui::PopStyleColor(2);
             
             ImGui::Dummy(ImVec2(0.0f, 5.0f));
@@ -175,7 +174,7 @@ void RenderLoop() {
             // 頁籤 2 按鈕
             if (g_CurrentTab == 1) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.00f, 0.48f, 1.00f, 1.00f));
             if (g_CurrentTab == 1) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.00f, 1.00f, 1.00f, 1.00f));
-            if (ImGui::Button(u8" 👁️ 視覺透視 ", ImVec2(110, 40))) g_CurrentTab = 1;
+            if (ImGui::Button(u8" 👁️ 視覺透視 ", ImVec2(115, 40))) g_CurrentTab = 1;
             if (g_CurrentTab == 1) ImGui::PopStyleColor(2);
             
             ImGui::Dummy(ImVec2(0.0f, 5.0f));
@@ -183,41 +182,56 @@ void RenderLoop() {
             // 頁籤 3 按鈕
             if (g_CurrentTab == 2) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.00f, 0.48f, 1.00f, 1.00f));
             if (g_CurrentTab == 2) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.00f, 1.00f, 1.00f, 1.00f));
-            if (ImGui::Button(u8" ⚙️ 系統設置 ", ImVec2(110, 40))) g_CurrentTab = 2;
+            if (ImGui::Button(u8" ⚙️ 系統設置 ", ImVec2(115, 40))) g_CurrentTab = 2;
             if (g_CurrentTab == 2) ImGui::PopStyleColor(2);
             
             ImGui::EndChild();
             
-            // 把右側內容推到與左側並排
-            ImGui::SameLine();
-            ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical); // 畫一條精緻的垂直分界線
-            ImGui::SameLine();
+            // 🎯 修正核心：用 SameLine + 分隔小間距取代會噴錯的內部 API SeparatorEx
+            ImGui::SameLine(0.0f, 15.0f);
             
-            // 右側子視窗：用來展示選中分頁的內容
-            ImGui::BeginChild("ContentBody", ImVec2(0, 0), false);
+            // ─── 右側主要內容主體 ───
+            // 我們把 ChildBorderSize 設為 1.0f 並推入淡淡的灰色，它就會自動幫我們在左側與內容間生出極為精緻的垂直分界邊框
+            ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.90f, 0.90f, 0.92f, 1.00f)); // 蘋果細緻灰邊框
+            
+            ImGui::BeginChild("ContentBody", ImVec2(0, 0), true, ImGuiWindowFlags_NoBackground);
+            
+            // 增加內容左邊距，不要讓文字貼在邊框上
+            ImGui::Dummy(ImVec2(0.0f, 2.0f));
             
             if (g_CurrentTab == 0) {
                 ImGui::Text(u8"核心狀態: 正常注入 (FPS: 60)");
                 ImGui::Separator();
+                ImGui::Dummy(ImVec2(0.0f, 5.0f));
                 ImGui::Checkbox(u8"啟用 YOLO 視覺自動追蹤", &g_AimbotState);
                 if (g_AimbotState) {
+                    ImGui::Dummy(ImVec2(0.0f, 5.0f));
                     ImGui::SliderFloat(u8"追蹤範圍 (FOV)", &g_AimbotFov, 30.0f, 300.0f, "%.0f px");
                 }
             } 
             else if (g_CurrentTab == 1) {
+                ImGui::Text(u8"視覺外觀覆蓋設定");
+                ImGui::Separator();
+                ImGui::Dummy(ImVec2(0.0f, 5.0f));
                 ImGui::Checkbox(u8"顯示目標方框 (2D Box)", &g_EspBox);
                 ImGui::Checkbox(u8"顯示追蹤射線 (Snaplines)", &g_EspLine);
             } 
             else if (g_CurrentTab == 2) {
+                ImGui::Text(u8"XS 系統核心資訊");
+                ImGui::Separator();
+                ImGui::Dummy(ImVec2(0.0f, 5.0f));
                 ImGui::TextDisabled(u8"授權團隊: XUANS 開發團隊");
                 ImGui::TextDisabled(u8"技術核心: C++ Native (OpenGL3)");
-                ImGui::Dummy(ImVec2(0.0f, 10.0f));
+                ImGui::Dummy(ImVec2(0.0f, 15.0f));
                 if (ImGui::Button(u8"安全卸載核心", ImVec2(140, 35))) {
                     g_Running = false;
                 }
             }
             
             ImGui::EndChild();
+            ImGui::PopStyleColor(); // 彈出 Border 顏色
+            ImGui::PopStyleVar();   // 彈出 ChildBorderSize 變數
             
             ImGui::End();
         } else {
