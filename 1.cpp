@@ -1,6 +1,6 @@
 #include <windows.h>
 #include <dwmapi.h>
-#include <GL/gl.h>
+#include <d3d11.h>
 #include <iostream>
 #include <thread>
 #include <atomic>
@@ -9,18 +9,21 @@
 
 #include "imgui.h"
 #include "imgui_impl_win32.h"
-#include "imgui_impl_opengl3.h"
+#include "imgui_impl_dx11.h"
 
 #pragma comment(lib, "dwmapi.lib")
-#pragma comment(lib, "opengl32.lib")
+#pragma comment(lib, "d3d11.lib")
 
 struct DetectedTarget {
     float x, y, w, h;
 };
 
+// ─── DirectX 11 全域變數 ───
 HWND g_hWnd = nullptr;
-HDC g_hDC = nullptr;
-HGLRC g_hRC = nullptr;
+ID3D11Device* g_pd3dDevice = nullptr;
+ID3D11DeviceContext* g_pd3dDeviceContext = nullptr;
+IDXGISwapChain* g_pSwapChain = nullptr;
+ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
 
 std::atomic<bool> g_Running(false);
 std::atomic<bool> g_Initialized(false); 
@@ -42,26 +45,71 @@ std::mutex g_TargetMutex;
 int g_CurrentTab = 0; 
 std::thread g_RenderThread;   
 
+// ─── DirectX 11 輔助函數 ───
+bool CreateDeviceD3D(HWND hWnd) {
+    DXGI_SWAP_CHAIN_DESC sd;
+    ZeroMemory(&sd, sizeof(sd));
+    sd.BufferCount = 2;
+    sd.BufferDesc.Width = 0;
+    sd.BufferDesc.Height = 0;
+    sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    sd.BufferDesc.RefreshRate.Numerator = 60;
+    sd.BufferDesc.RefreshRate.Denominator = 1;
+    sd.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
+    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    sd.OutputWindow = hWnd;
+    sd.SampleDesc.Count = 1;
+    sd.SampleDesc.Quality = 0;
+    sd.Windowed = TRUE;
+    sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+
+    UINT createDeviceFlags = 0;
+    D3D_FEATURE_LEVEL featureLevel;
+    const D3D_FEATURE_LEVEL featureLevelArray[2] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0, };
+    HRESULT res = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, createDeviceFlags, featureLevelArray, 2, D3D11_SDK_VERSION, &sd, &g_pSwapChain, &g_pd3dDevice, &featureLevel, &g_pd3dDeviceContext);
+    if (res == DXGI_ERROR_UNSUPPORTED)
+        res = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, createDeviceFlags, featureLevelArray, 2, D3D11_SDK_VERSION, &sd, &g_pSwapChain, &g_pd3dDevice, &featureLevel, &g_pd3dDeviceContext);
+    if (res != S_OK)
+        return false;
+
+    ID3D11Texture2D* pBackBuffer;
+    g_pSwapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer));
+    g_pd3dDevice->CreateRenderTargetView(pBackBuffer, nullptr, &g_mainRenderTargetView);
+    pBackBuffer->Release();
+    return true;
+}
+
+void CleanupDeviceD3D() {
+    if (g_mainRenderTargetView) { g_mainRenderTargetView->Release(); g_mainRenderTargetView = nullptr; }
+    if (g_pSwapChain) { g_pSwapChain->Release(); g_pSwapChain = nullptr; }
+    if (g_pd3dDeviceContext) { g_pd3dDeviceContext->Release(); g_pd3dDeviceContext = nullptr; }
+    if (g_pd3dDevice) { g_pd3dDevice->Release(); g_pd3dDevice = nullptr; }
+}
+
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
         return true;
     switch (msg) {
+        case WM_SYSCOMMAND:
+            if ((wParam & 0xFFF0) == SC_KEYMENU) return 0;
+            break;
         case WM_CLOSE: g_Running = false; return 0;
-        case WM_DESTROY: return 0;
+        case WM_DESTROY: PostQuitMessage(0); return 0;
         default: return DefWindowProc(hWnd, msg, wParam, lParam);
     }
+    return DefWindowProc(hWnd, msg, wParam, lParam);
 }
 
 void RenderLoop() {
     WNDCLASSEXW wc = { sizeof(WNDCLASSEXW), CS_HREDRAW | CS_VREDRAW, WndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, L"XUANS_Overlay", nullptr };
     RegisterClassExW(&wc);
 
-    // 🎯 修正 1：調整視窗擴展屬性，移除過時的 WS_EX_LAYERED 的色彩鍵
+    // 使用 Layered 透明穿透視窗
     g_hWnd = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED,
-        L"XUANS_Overlay", L"XUANS Overlay Menu",
+        wc.lpszClassName, L"XUANS D3D11 Overlay",
         WS_POPUP,
         0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN),
         nullptr, nullptr, wc.hInstance, nullptr
@@ -69,19 +117,21 @@ void RenderLoop() {
 
     if (!g_hWnd) { g_Running = false; return; }
 
-    // 🎯 修正 2：使用層級視窗透明度（不指定特定顏色剪裁，防止黑底）
-    SetLayeredWindowAttributes(g_hWnd, 0, 255, LWA_ALPHA);
+    // 使用 ColorKey 黑色透明穿透，在 D3D11 下極其穩定
+    SetLayeredWindowAttributes(g_hWnd, RGB(0, 0, 0), 255, LWA_COLORKEY);
     
-    // 🎯 修正 3：正確啟用 DWM 全視窗模糊擴展，這是 Windows 10/11 透明的標準做法
     MARGINS margins = { -1, -1, -1, -1 };
     DwmExtendFrameIntoClientArea(g_hWnd, &margins);
 
-    PIXELFORMATDESCRIPTOR pfd = { sizeof(PIXELFORMATDESCRIPTOR), 1, PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER, PFD_TYPE_RGBA, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 0, 0, PFD_MAIN_PLANE, 0, 0, 0, 0 };
-    g_hDC = GetDC(g_hWnd);
-    int pixelFormat = ChoosePixelFormat(g_hDC, &pfd);
-    SetPixelFormat(g_hDC, pixelFormat, &pfd);
-    g_hRC = wglCreateContext(g_hDC);
-    wglMakeCurrent(g_hDC, g_hRC);
+    if (!CreateDeviceD3D(g_hWnd)) {
+        CleanupDeviceD3D();
+        UnregisterClassW(wc.lpszClassName, wc.hInstance);
+        g_Running = false;
+        return;
+    }
+
+    ShowWindow(g_hWnd, SW_SHOWDEFAULT);
+    UpdateWindow(g_hWnd);
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -108,7 +158,7 @@ void RenderLoop() {
     io.Fonts->AddFontFromFileTTF(fontPath, 18.0f, nullptr, io.Fonts->GetGlyphRangesChineseFull());
 
     ImGui_ImplWin32_Init(g_hWnd);
-    ImGui_ImplOpenGL3_Init("#version 130");
+    ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
 
     g_Initialized = true; 
 
@@ -119,8 +169,7 @@ void RenderLoop() {
             DispatchMessage(&msg);
         }
 
-        wglMakeCurrent(g_hDC, g_hRC);
-        ImGui_ImplOpenGL3_NewFrame();
+        ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
 
@@ -236,7 +285,7 @@ void RenderLoop() {
                 ImGui::Text(u8"XS 系統核心資訊");
                 ImGui::Separator(); ImGui::Dummy(ImVec2(0.0f, 5.0f));
                 ImGui::TextDisabled(u8"授權團隊: XUANS 開發團隊");
-                ImGui::TextDisabled(u8"技術核心: C++ Native (OpenGL3)");
+                ImGui::TextDisabled(u8"技術核心: C++ Native (D3D11)");
                 ImGui::Dummy(ImVec2(0.0f, 15.0f));
                 if (ImGui::Button(u8"安全卸載核心", ImVec2(140, 35))) g_Running = false;
             }
@@ -245,25 +294,28 @@ void RenderLoop() {
             ImGui::PopStyleColor(); ImGui::PopStyleVar();   
             ImGui::End();
         } else {
-            // 隱藏選單時也保持完全點擊穿透與透明
             SetWindowLong(g_hWnd, GWL_EXSTYLE, WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED);
         }
 
         ImGui::Render();
-        glViewport(0, 0, (int)ImGui::GetMainViewport()->Size.x, (int)ImGui::GetMainViewport()->Size.y);
         
-        // 🎯 修正 4：清空 Alpha 通道為 0，這能告訴 DWM 此處需要全透明穿透
-        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
+        // 🎯 D3D11 完美全透明清屏色 (0, 0, 0, 0)
+        const float clear_color_with_alpha[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
+        g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color_with_alpha);
         
-        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-        SwapBuffers(g_hDC);
-        std::this_thread::sleep_for(std::chrono::milliseconds(16));
+        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+        
+        // 垂直同步開關 (1 為限制 60 幀降低 CPU 消耗)
+        g_pSwapChain->Present(1, 0); 
     }
 
-    ImGui_ImplOpenGL3_Shutdown(); ImGui_ImplWin32_Shutdown(); ImGui::DestroyContext();
-    wglMakeCurrent(nullptr, nullptr); wglDeleteContext(g_hRC); ReleaseDC(g_hWnd, g_hDC); DestroyWindow(g_hWnd);
-    UnregisterClassW(L"XUANS_Overlay", GetModuleHandle(nullptr));
+    ImGui_ImplDX11_Shutdown();
+    ImGui_ImplWin32_Shutdown();
+    ImGui::DestroyContext();
+    CleanupDeviceD3D();
+    DestroyWindow(g_hWnd);
+    UnregisterClassW(wc.lpszClassName, wc.hInstance);
 }
 
 extern "C" {
