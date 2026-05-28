@@ -25,7 +25,7 @@ HDC g_hDC = nullptr;
 HGLRC g_hRC = nullptr;
 
 std::atomic<bool> g_Running(false);
-std::atomic<bool> g_Initialized(false); 
+std::atomic<bool> g_Initialized(false); // ✨ 防禦核心：確保初始化完成才允許繪製
 
 bool g_ShowMenu = true;       
 bool g_AimbotState = false;   
@@ -83,6 +83,7 @@ void RenderLoop() {
     g_hRC = wglCreateContext(g_hDC);
     wglMakeCurrent(g_hDC, g_hRC);
 
+    // ─── 嚴格初始化 ImGui 上下文 ───
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGui::StyleColorsLight(); 
@@ -110,7 +111,7 @@ void RenderLoop() {
     ImGui_ImplWin32_Init(g_hWnd);
     ImGui_ImplOpenGL3_Init("#version 130");
 
-    g_Initialized = true; 
+    g_Initialized = true; // ✨ 解鎖安全鎖：通告全域後端完全就緒
 
     while (g_Running) {
         MSG msg;
@@ -141,7 +142,7 @@ void RenderLoop() {
         }
         canvas_draw->AddCircleFilled(ImVec2(centerX, centerY), 3.5f, IM_COL32(255, 69, 58, 255)); 
 
-        // ✨ 核心渲染邏輯：實時繪製 YOLO 傳過來的物體
+        // 核心渲染邏輯：實時繪製 YOLO 傳過來的物體
         {
             std::lock_guard<std::mutex> lock(g_TargetMutex);
             ImU32 box_color_u32 = IM_COL32((int)(g_BoxColor[0]*255), (int)(g_BoxColor[1]*255), (int)(g_BoxColor[2]*255), (int)(g_BoxColor[3]*255));
@@ -155,7 +156,7 @@ void RenderLoop() {
                         box_color_u32, 0.0f, 0, 2.0f
                     );
                 }
-                // 繪製追蹤射線 (從螢幕底部發射到目標腳底/中心)
+                // 繪製追蹤射線 (從螢幕底部發射到目標中心下方)
                 if (g_EspLine) {
                     canvas_draw->AddLine(
                         ImVec2(centerX, screenH),
@@ -183,6 +184,7 @@ void RenderLoop() {
             ImGui::TextDisabled(u8"XUANS 高級核心控制器");
             ImGui::SetCursorPosY(45.0f); ImGui::Separator();
             
+            // ─── 左側邊欄導航 ───
             ImGui::BeginChild("Sidebar", ImVec2(125, 0), false, ImGuiWindowFlags_NoBackground);
             ImGui::Dummy(ImVec2(0.0f, 5.0f));
             int pushedColors = 0;
@@ -203,6 +205,8 @@ void RenderLoop() {
             ImGui::EndChild();
             
             ImGui::SameLine(0.0f, 15.0f);
+            
+            // ─── 右側主要內容主體 ───
             ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
             ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.90f, 0.90f, 0.92f, 1.00f)); 
             ImGui::BeginChild("ContentBody", ImVec2(0, 0), true, ImGuiWindowFlags_NoBackground);
@@ -276,12 +280,12 @@ extern "C" {
     __declspec(dllexport) void StopOverlay() { g_Running = false; g_Initialized = false; }
     __declspec(dllexport) void ToggleMenu(bool visible) { if (g_Initialized) g_ShowMenu = visible; }
     __declspec(dllexport) bool GetAimbotState() { return g_AimbotState; }
-    __declspec(dllexport) float gGetAimbotFov() { return g_AimbotFov; } // ✨ 新增：獲取當前滑動條設定的 FOV
+    __declspec(dllexport) float gGetAimbotFov() { return g_AimbotFov; } 
     __declspec(dllexport) float GetAimbotSmooth() { return g_AimbotSmooth; }
     __declspec(dllexport) int GetTargetBone() { return g_TargetBone; }
     __declspec(dllexport) bool IsOverlayReady() { return g_Initialized.load(); }
 
-    // ✨ 關鍵核心函數：供 Python 實時傳入 YOLO 識別到的目標數據
+    // 實時更新目標坐標核心接口
     __declspec(dllexport) void UpdateYoloTargets(float* x_arr, float* y_arr, float* w_arr, float* h_arr, int count) {
         if (!g_Initialized) return;
         std::lock_guard<std::mutex> lock(g_TargetMutex);
