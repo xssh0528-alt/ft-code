@@ -14,23 +14,20 @@
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "opengl32.lib")
 
-// ─── 結構體定義：接收 YOLO 傳遞的目標 ───
 struct DetectedTarget {
     float x, y, w, h;
 };
 
-// ─── 全域執行緒安全變數 ───
 HWND g_hWnd = nullptr;
 HDC g_hDC = nullptr;
 HGLRC g_hRC = nullptr;
 
 std::atomic<bool> g_Running(false);
-std::atomic<bool> g_Initialized(false); // ✨ 防禦核心：確保初始化完成才允許繪製
+std::atomic<bool> g_Initialized(false); 
 
 bool g_ShowMenu = true;       
 bool g_AimbotState = false;   
 
-// ─── 進階控制參數 ───
 bool g_EspBox = false;
 bool g_EspLine = false;
 float g_AimbotFov = 90.0f;
@@ -39,7 +36,6 @@ int g_TargetBone = 0;
 const char* g_BoneNames[] = { u8"骨骼: 頭部 (Head)", u8"骨骼: 胸口 (Chest)", u8"骨骼: 腹部 (Pelvis)" };
 float g_BoxColor[4] = { 0.0f, 0.48f, 1.0f, 1.0f }; 
 
-// ─── YOLO 坐標共享快取 ───
 std::vector<DetectedTarget> g_DetectedTargets;
 std::mutex g_TargetMutex;
 
@@ -62,6 +58,7 @@ void RenderLoop() {
     WNDCLASSEXW wc = { sizeof(WNDCLASSEXW), CS_HREDRAW | CS_VREDRAW, WndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, L"XUANS_Overlay", nullptr };
     RegisterClassExW(&wc);
 
+    // 🎯 修正 1：調整視窗擴展屬性，移除過時的 WS_EX_LAYERED 的色彩鍵
     g_hWnd = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED,
         L"XUANS_Overlay", L"XUANS Overlay Menu",
@@ -72,8 +69,11 @@ void RenderLoop() {
 
     if (!g_hWnd) { g_Running = false; return; }
 
-    SetLayeredWindowAttributes(g_hWnd, RGB(0, 0, 0), 255, LWA_COLORKEY);
-    MARGINS margins = { -1 };
+    // 🎯 修正 2：使用層級視窗透明度（不指定特定顏色剪裁，防止黑底）
+    SetLayeredWindowAttributes(g_hWnd, 0, 255, LWA_ALPHA);
+    
+    // 🎯 修正 3：正確啟用 DWM 全視窗模糊擴展，這是 Windows 10/11 透明的標準做法
+    MARGINS margins = { -1, -1, -1, -1 };
     DwmExtendFrameIntoClientArea(g_hWnd, &margins);
 
     PIXELFORMATDESCRIPTOR pfd = { sizeof(PIXELFORMATDESCRIPTOR), 1, PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER, PFD_TYPE_RGBA, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 0, 0, PFD_MAIN_PLANE, 0, 0, 0, 0 };
@@ -83,7 +83,6 @@ void RenderLoop() {
     g_hRC = wglCreateContext(g_hDC);
     wglMakeCurrent(g_hDC, g_hRC);
 
-    // ─── 嚴格初始化 ImGui 上下文 ───
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGui::StyleColorsLight(); 
@@ -111,7 +110,7 @@ void RenderLoop() {
     ImGui_ImplWin32_Init(g_hWnd);
     ImGui_ImplOpenGL3_Init("#version 130");
 
-    g_Initialized = true; // ✨ 解鎖安全鎖：通告全域後端完全就緒
+    g_Initialized = true; 
 
     while (g_Running) {
         MSG msg;
@@ -130,7 +129,7 @@ void RenderLoop() {
         float centerX = screenW / 2.0f;
         float centerY = screenH / 2.0f;
 
-        // ─── 畫布層：繪製中心點、FOV與 YOLO 動態追蹤視覺 ───
+        // ─── 畫布層 ───
         ImGui::SetNextWindowPos(ImGui::GetMainViewport()->Pos);
         ImGui::SetNextWindowSize(ImGui::GetMainViewport()->Size);
         ImGui::Begin("Canvas", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoInputs);
@@ -142,13 +141,11 @@ void RenderLoop() {
         }
         canvas_draw->AddCircleFilled(ImVec2(centerX, centerY), 3.5f, IM_COL32(255, 69, 58, 255)); 
 
-        // 核心渲染邏輯：實時繪製 YOLO 傳過來的物體
         {
             std::lock_guard<std::mutex> lock(g_TargetMutex);
             ImU32 box_color_u32 = IM_COL32((int)(g_BoxColor[0]*255), (int)(g_BoxColor[1]*255), (int)(g_BoxColor[2]*255), (int)(g_BoxColor[3]*255));
             
             for (const auto& target : g_DetectedTargets) {
-                // 繪製 2D 方框
                 if (g_EspBox) {
                     canvas_draw->AddRect(
                         ImVec2(target.x - target.w / 2.0f, target.y - target.h / 2.0f),
@@ -156,7 +153,6 @@ void RenderLoop() {
                         box_color_u32, 0.0f, 0, 2.0f
                     );
                 }
-                // 繪製追蹤射線 (從螢幕底部發射到目標中心下方)
                 if (g_EspLine) {
                     canvas_draw->AddLine(
                         ImVec2(centerX, screenH),
@@ -184,7 +180,6 @@ void RenderLoop() {
             ImGui::TextDisabled(u8"XUANS 高級核心控制器");
             ImGui::SetCursorPosY(45.0f); ImGui::Separator();
             
-            // ─── 左側邊欄導航 ───
             ImGui::BeginChild("Sidebar", ImVec2(125, 0), false, ImGuiWindowFlags_NoBackground);
             ImGui::Dummy(ImVec2(0.0f, 5.0f));
             int pushedColors = 0;
@@ -205,8 +200,6 @@ void RenderLoop() {
             ImGui::EndChild();
             
             ImGui::SameLine(0.0f, 15.0f);
-            
-            // ─── 右側主要內容主體 ───
             ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
             ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.90f, 0.90f, 0.92f, 1.00f)); 
             ImGui::BeginChild("ContentBody", ImVec2(0, 0), true, ImGuiWindowFlags_NoBackground);
@@ -252,13 +245,17 @@ void RenderLoop() {
             ImGui::PopStyleColor(); ImGui::PopStyleVar();   
             ImGui::End();
         } else {
+            // 隱藏選單時也保持完全點擊穿透與透明
             SetWindowLong(g_hWnd, GWL_EXSTYLE, WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED);
         }
 
         ImGui::Render();
         glViewport(0, 0, (int)ImGui::GetMainViewport()->Size.x, (int)ImGui::GetMainViewport()->Size.y);
+        
+        // 🎯 修正 4：清空 Alpha 通道為 0，這能告訴 DWM 此處需要全透明穿透
         glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
         glClear(GL_COLOR_BUFFER_BIT);
+        
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         SwapBuffers(g_hDC);
         std::this_thread::sleep_for(std::chrono::milliseconds(16));
@@ -269,7 +266,6 @@ void RenderLoop() {
     UnregisterClassW(L"XUANS_Overlay", GetModuleHandle(nullptr));
 }
 
-// ─── 嚴格的 C 導出介面 ───
 extern "C" {
     __declspec(dllexport) void StartOverlay() {
         if (g_Running) return;
@@ -285,7 +281,6 @@ extern "C" {
     __declspec(dllexport) int GetTargetBone() { return g_TargetBone; }
     __declspec(dllexport) bool IsOverlayReady() { return g_Initialized.load(); }
 
-    // 實時更新目標坐標核心接口
     __declspec(dllexport) void UpdateYoloTargets(float* x_arr, float* y_arr, float* w_arr, float* h_arr, int count) {
         if (!g_Initialized) return;
         std::lock_guard<std::mutex> lock(g_TargetMutex);
