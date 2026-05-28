@@ -7,9 +7,15 @@
 #include <vector>
 #include <mutex>
 
-#include "imgui.h"
-#include "imgui_impl_win32.h"
-#include "imgui_impl_dx11.h"
+// 🎯 修正路徑：直接指向 imgui 資料夾
+#include "imgui/imgui.h"
+#include "imgui/imgui_impl_win32.h"
+
+// ─── 核心魔改：直接在程式碼內聲明 DX11 所需的 ImGui 接口，免去 include dx11.h ───
+IMGUI_IMPL_API bool ImGui_ImplDX11_Init(ID3D11Device* device, ID3D11DeviceContext* device_context);
+IMGUI_IMPL_API void ImGui_ImplDX11_Shutdown();
+IMGUI_IMPL_API void ImGui_ImplDX11_NewFrame();
+IMGUI_IMPL_API void ImGui_ImplDX11_RenderDrawData(ImDrawData* draw_data);
 
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "d3d11.lib")
@@ -45,7 +51,6 @@ std::mutex g_TargetMutex;
 int g_CurrentTab = 0; 
 std::thread g_RenderThread;   
 
-// ─── DirectX 11 輔助函數 ───
 bool CreateDeviceD3D(HWND hWnd) {
     DXGI_SWAP_CHAIN_DESC sd;
     ZeroMemory(&sd, sizeof(sd));
@@ -106,7 +111,6 @@ void RenderLoop() {
     WNDCLASSEXW wc = { sizeof(WNDCLASSEXW), CS_HREDRAW | CS_VREDRAW, WndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, L"XUANS_Overlay", nullptr };
     RegisterClassExW(&wc);
 
-    // 使用 Layered 透明穿透視窗
     g_hWnd = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED,
         wc.lpszClassName, L"XUANS D3D11 Overlay",
@@ -117,7 +121,6 @@ void RenderLoop() {
 
     if (!g_hWnd) { g_Running = false; return; }
 
-    // 使用 ColorKey 黑色透明穿透，在 D3D11 下極其穩定
     SetLayeredWindowAttributes(g_hWnd, RGB(0, 0, 0), 255, LWA_COLORKEY);
     
     MARGINS margins = { -1, -1, -1, -1 };
@@ -233,112 +236,4 @@ void RenderLoop() {
             ImGui::Dummy(ImVec2(0.0f, 5.0f));
             int pushedColors = 0;
 
-            if (g_CurrentTab == 0) { ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.00f, 0.48f, 1.00f, 1.00f)); ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.00f, 1.00f, 1.00f, 1.00f)); pushedColors = 2; }
-            if (ImGui::Button(u8"主控自瞄", ImVec2(115, 40))) g_CurrentTab = 0;
-            if (pushedColors > 0) { ImGui::PopStyleColor(pushedColors); pushedColors = 0; }
-            ImGui::Dummy(ImVec2(0.0f, 5.0f));
-            
-            if (g_CurrentTab == 1) { ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.00f, 0.48f, 1.00f, 1.00f)); ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.00f, 1.00f, 1.00f, 1.00f)); pushedColors = 2; }
-            if (ImGui::Button(u8"視覺透視", ImVec2(115, 40))) g_CurrentTab = 1;
-            if (pushedColors > 0) { ImGui::PopStyleColor(pushedColors); pushedColors = 0; }
-            ImGui::Dummy(ImVec2(0.0f, 5.0f));
-            
-            if (g_CurrentTab == 2) { ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.00f, 0.48f, 1.00f, 1.00f)); ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.00f, 1.00f, 1.00f, 1.00f)); pushedColors = 2; }
-            if (ImGui::Button(u8"系統設置", ImVec2(115, 40))) g_CurrentTab = 2;
-            if (pushedColors > 0) { ImGui::PopStyleColor(pushedColors); pushedColors = 0; }
-            ImGui::EndChild();
-            
-            ImGui::SameLine(0.0f, 15.0f);
-            ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
-            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.90f, 0.90f, 0.92f, 1.00f)); 
-            ImGui::BeginChild("ContentBody", ImVec2(0, 0), true, ImGuiWindowFlags_NoBackground);
-            ImGui::Dummy(ImVec2(0.0f, 2.0f));
-            
             if (g_CurrentTab == 0) {
-                ImGui::Text(u8"核心狀態: 正常注入 (FPS: 60)");
-                ImGui::Separator(); ImGui::Dummy(ImVec2(0.0f, 5.0f));
-                ImGui::Checkbox(u8"啟用 YOLO 視覺自動追蹤", &g_AimbotState);
-                if (g_AimbotState) {
-                    ImGui::Dummy(ImVec2(0.0f, 5.0f));
-                    ImGui::SliderFloat(u8"追蹤範圍 (FOV)", &g_AimbotFov, 30.0f, 300.0f, "%.0f px");
-                    ImGui::SliderFloat(u8"滑動平滑度 (Smooth)", &g_AimbotSmooth, 1.0f, 20.0f, "%.1f");
-                    ImGui::SetNextItemWidth(180.0f);
-                    if (ImGui::BeginCombo(u8"瞄準部位", g_BoneNames[g_TargetBone])) {
-                        for (int n = 0; n < 3; n++) {
-                            if (ImGui::Selectable(g_BoneNames[n], g_TargetBone == n)) g_TargetBone = n;
-                        }
-                        ImGui::EndCombo();
-                    }
-                }
-            } 
-            else if (g_CurrentTab == 1) {
-                ImGui::Text(u8"視覺外觀覆蓋設定");
-                ImGui::Separator(); ImGui::Dummy(ImVec2(0.0f, 5.0f));
-                ImGui::Checkbox(u8"顯示目標方框 (2D Box)", &g_EspBox);
-                ImGui::Checkbox(u8"顯示追蹤射線 (Snaplines)", &g_EspLine);
-                if (g_EspBox) {
-                    ImGui::Dummy(ImVec2(0.0f, 5.0f)); ImGui::Text(u8"外框顏色自訂:"); ImGui::SameLine();
-                    ImGui::ColorEdit4(u8"##BoxColorPicker", g_BoxColor, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
-                }
-            } 
-            else if (g_CurrentTab == 2) {
-                ImGui::Text(u8"XS 系統核心資訊");
-                ImGui::Separator(); ImGui::Dummy(ImVec2(0.0f, 5.0f));
-                ImGui::TextDisabled(u8"授權團隊: XUANS 開發團隊");
-                ImGui::TextDisabled(u8"技術核心: C++ Native (D3D11)");
-                ImGui::Dummy(ImVec2(0.0f, 15.0f));
-                if (ImGui::Button(u8"安全卸載核心", ImVec2(140, 35))) g_Running = false;
-            }
-            
-            ImGui::EndChild();
-            ImGui::PopStyleColor(); ImGui::PopStyleVar();   
-            ImGui::End();
-        } else {
-            SetWindowLong(g_hWnd, GWL_EXSTYLE, WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED);
-        }
-
-        ImGui::Render();
-        
-        // 🎯 D3D11 完美全透明清屏色 (0, 0, 0, 0)
-        const float clear_color_with_alpha[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-        g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
-        g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color_with_alpha);
-        
-        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-        
-        // 垂直同步開關 (1 為限制 60 幀降低 CPU 消耗)
-        g_pSwapChain->Present(1, 0); 
-    }
-
-    ImGui_ImplDX11_Shutdown();
-    ImGui_ImplWin32_Shutdown();
-    ImGui::DestroyContext();
-    CleanupDeviceD3D();
-    DestroyWindow(g_hWnd);
-    UnregisterClassW(wc.lpszClassName, wc.hInstance);
-}
-
-extern "C" {
-    __declspec(dllexport) void StartOverlay() {
-        if (g_Running) return;
-        g_Running = true; g_Initialized = false; 
-        g_RenderThread = std::thread(RenderLoop);
-        g_RenderThread.detach();
-    }
-    __declspec(dllexport) void StopOverlay() { g_Running = false; g_Initialized = false; }
-    __declspec(dllexport) void ToggleMenu(bool visible) { if (g_Initialized) g_ShowMenu = visible; }
-    __declspec(dllexport) bool GetAimbotState() { return g_AimbotState; }
-    __declspec(dllexport) float gGetAimbotFov() { return g_AimbotFov; } 
-    __declspec(dllexport) float GetAimbotSmooth() { return g_AimbotSmooth; }
-    __declspec(dllexport) int GetTargetBone() { return g_TargetBone; }
-    __declspec(dllexport) bool IsOverlayReady() { return g_Initialized.load(); }
-
-    __declspec(dllexport) void UpdateYoloTargets(float* x_arr, float* y_arr, float* w_arr, float* h_arr, int count) {
-        if (!g_Initialized) return;
-        std::lock_guard<std::mutex> lock(g_TargetMutex);
-        g_DetectedTargets.clear();
-        for (int i = 0; i < count; i++) {
-            g_DetectedTargets.push_back({ x_arr[i], y_arr[i], w_arr[i], h_arr[i] });
-        }
-    }
-}
