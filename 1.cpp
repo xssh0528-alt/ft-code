@@ -183,7 +183,7 @@ static void ImGui_ImplDX11_CreateDeviceObjects() {
     // 6. 建立常數緩衝區 (Constant Buffer)
     D3D11_BUFFER_DESC cbDesc = {};
     cbDesc.ByteWidth = sizeof(VERTEX_CONSTANT_BUFFER); cbDesc.Usage = D3D11_USAGE_DYNAMIC;
-    cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER; cbDesc.CPUAccessFlags = D3D11_CPUAccessFlags::D3D11_CPU_ACCESS_WRITE;
+    cbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     bd->pd3dDevice->CreateBuffer(&cbDesc, nullptr, &bd->pVertexConstantBuffer);
 
     // 7. 渲染狀態設定 (Blend, Depth, Rasterizer)
