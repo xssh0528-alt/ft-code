@@ -45,7 +45,7 @@ std::mutex g_TargetMutex;
 int g_CurrentTab = 0; 
 std::thread g_RenderThread;   
 
-// ─── 核心魔改：直接在本地實現 ImGui DX11 後端函數，徹底解決 LNK2019 ───
+// ─── 核心魔改：直接在本地實現 ImGui DX11 後端函數 ───
 struct ImGui_ImplDX11_Data {
     ID3D11Device* pd3dDevice;
     ID3D11DeviceContext* pd3dDeviceContext;
@@ -92,7 +92,12 @@ static void ImGui_ImplDX11_DestroyDeviceObjects() {
     if (bd->pVertexConstantBuffer) { bd->pVertexConstantBuffer->Release(); bd->pVertexConstantBuffer = nullptr; }
     if (bd->pPixelShader) { bd->pPixelShader->Release(); bd->pPixelShader = nullptr; }
     if (bd->pFontSampler) { bd->pFontSampler->Release(); bd->pFontSampler = nullptr; }
-    if (bd->pFontTextureView) { bd->pFontTextureView->Release(); bd->pFontTextureView = nullptr; io.Fonts->SetTexID(nullptr); }
+    if (bd->pFontTextureView) { 
+        bd->pFontTextureView->Release(); 
+        bd->pFontTextureView = nullptr; 
+        ImGuiIO& io = ImGui::GetIO(); // 🎯 修正點 1：補上 io 宣告，解決 C2065
+        io.Fonts->SetTexID(nullptr); 
+    }
     if (bd->pRasterizerState) { bd->pRasterizerState->Release(); bd->pRasterizerState = nullptr; }
     if (bd->pBlendState) { bd->pBlendState->Release(); bd->pBlendState = nullptr; }
     if (bd->pDepthStencilState) { bd->pDepthStencilState->Release(); bd->pDepthStencilState = nullptr; }
@@ -108,12 +113,10 @@ IMGUI_IMPL_API void ImGui_ImplDX11_Shutdown() {
     IM_DELETE(bd);
 }
 
-// 用於動態建立 DX11 著色器資源的最精簡實作
 static void ImGui_ImplDX11_CreateDeviceObjects() {
     ImGui_ImplDX11_Data* bd = ImGui_ImplDX11_GetBackendData();
     if (!bd || bd->pFontTextureView) return;
 
-    // 建立字體紋理
     ImGuiIO& io = ImGui::GetIO();
     unsigned char* pixels; int width, height;
     io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
@@ -137,7 +140,6 @@ static void ImGui_ImplDX11_CreateDeviceObjects() {
     pTexture->Release();
     io.Fonts->SetTexID((ImTextureID)bd->pFontTextureView);
 
-    // 建立狀態對象 (混合、深度)
     D3D11_BLEND_DESC blend_desc; ZeroMemory(&blend_desc, sizeof(blend_desc));
     blend_desc.AlphaToCoverageEnable = FALSE; blend_desc.RenderTarget[0].BlendEnable = TRUE;
     blend_desc.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA; blend_desc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
@@ -157,12 +159,10 @@ IMGUI_IMPL_API void ImGui_ImplDX11_NewFrame() {
     if (!bd->pFontTextureView) ImGui_ImplDX11_CreateDeviceObjects();
 }
 
-// 渲染回調：直接交給微軟內建圖形管道渲染 ImGui 的頂點緩衝
 IMGUI_IMPL_API void ImGui_ImplDX11_RenderDrawData(ImDrawData* draw_data) {
     ImGui_ImplDX11_Data* bd = ImGui_ImplDX11_GetBackendData();
     if (!bd || draw_data->DisplaySize.x <= 0.0f || draw_data->DisplaySize.y <= 0.0f) return;
 
-    // 由於我們主打超輕量覆蓋，直接讓設備上下文套用基礎透明渲染
     bd->pd3dDeviceContext->OMSetBlendState(bd->pBlendState, nullptr, 0xffffffff);
     bd->pd3dDeviceContext->OMSetDepthStencilState(bd->pDepthStencilState, 0);
 }
@@ -177,5 +177,4 @@ bool CreateDeviceD3D(HWND hWnd) {
     sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     sd.BufferDesc.RefreshRate.Numerator = 60;
     sd.BufferDesc.RefreshRate.Denominator = 1;
-    sd.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
-    sd.BufferUsage = DXGI_USAGE_RENDER
+    sd.Flags = DXGI_SWAP_CHAIN_FLAG_
