@@ -6,14 +6,15 @@
 #include <atomic>
 #include <vector>
 #include <mutex>
+#include <d3dcompiler.h> // 🎯 魔改後端編譯著色器必備
 
-// 指向 imgui 資料夾（改用官方標準後端，避免殘缺手寫導致黑畫面/崩潰）
+// 指向 imgui 資料夾
 #include "imgui/imgui.h"
 #include "imgui/imgui_impl_win32.h"
-#include "imgui/imgui_impl_dx11.h"
 
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "d3dcompiler.lib") // 🎯 連結著色器編譯程式庫
 
 struct DetectedTarget {
     float x, y, w, h;
@@ -45,6 +46,262 @@ std::mutex g_TargetMutex;
 
 int g_CurrentTab = 0; 
 std::thread g_RenderThread;   
+
+// ─── 完美修復版：本地 ImGui DX11 後端數據與渲染管線 ───
+struct ImGui_ImplDX11_Data {
+    ID3D11Device* pd3dDevice;
+    ID3D11DeviceContext* pd3dDeviceContext;
+    ID3D11Buffer* pVB;
+    ID3D11Buffer* pIB;
+    ID3D11VertexShader* pVertexShader;
+    ID3D11InputLayout* pInputLayout;
+    ID3D11Buffer* pVertexConstantBuffer;
+    ID3D11PixelShader* pPixelShader;
+    ID3D11SamplerState* pFontSampler;
+    ID3D11ShaderResourceView* pFontTextureView;
+    ID3D11RasterizerState* pRasterizerState;
+    ID3D11BlendState* pBlendState;
+    ID3D11DepthStencilState* pDepthStencilState;
+    int VertexBufferSize;
+    int IndexBufferSize;
+    ImGui_ImplDX11_Data() { memset(this, 0, sizeof(*this)); VertexBufferSize = 5000; IndexBufferSize = 10000; }
+};
+
+struct VERTEX_CONSTANT_BUFFER {
+    float mvp[4][4];
+};
+
+static ImGui_ImplDX11_Data* ImGui_ImplDX11_GetBackendData() {
+    return ImGui::GetCurrentContext() ? (ImGui_ImplDX11_Data*)ImGui::GetIO().BackendRendererUserData : nullptr;
+}
+
+IMGUI_IMPL_API bool ImGui_ImplDX11_Init(ID3D11Device* device, ID3D11DeviceContext* device_context) {
+    ImGuiIO& io = ImGui::GetIO();
+    IM_ASSERT(io.BackendRendererUserData == nullptr && "Renderer backend already initialized!");
+    ImGui_ImplDX11_Data* bd = IM_NEW(ImGui_ImplDX11_Data)();
+    io.BackendRendererUserData = (void*)bd;
+    io.BackendRendererName = "imgui_impl_dx11_xuans_fixed";
+    io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
+    bd->pd3dDevice = device;
+    bd->pd3dDeviceContext = device_context;
+    return true;
+}
+
+static void ImGui_ImplDX11_DestroyDeviceObjects() {
+    ImGui_ImplDX11_Data* bd = ImGui_ImplDX11_GetBackendData();
+    if (!bd) return;
+    if (bd->pVB) { bd->pVB->Release(); bd->pVB = nullptr; }
+    if (bd->pIB) { bd->pIB->Release(); bd->pIB = nullptr; }
+    if (bd->pVertexShader) { bd->pVertexShader->Release(); bd->pVertexShader = nullptr; }
+    if (bd->pInputLayout) { bd->pInputLayout->Release(); bd->pInputLayout = nullptr; }
+    if (bd->pVertexConstantBuffer) { bd->pVertexConstantBuffer->Release(); bd->pVertexConstantBuffer = nullptr; }
+    if (bd->pPixelShader) { bd->pPixelShader->Release(); bd->pPixelShader = nullptr; }
+    if (bd->pFontSampler) { bd->pFontSampler->Release(); bd->pFontSampler = nullptr; }
+    if (bd->pFontTextureView) { bd->pFontTextureView->Release(); bd->pFontTextureView = nullptr; ImGui::GetIO().Fonts->SetTexID(nullptr); }
+    if (bd->pRasterizerState) { bd->pRasterizerState->Release(); bd->pRasterizerState = nullptr; }
+    if (bd->pBlendState) { bd->pBlendState->Release(); bd->pBlendState = nullptr; }
+    if (bd->pDepthStencilState) { bd->pDepthStencilState->Release(); bd->pDepthStencilState = nullptr; }
+}
+
+IMGUI_IMPL_API void ImGui_ImplDX11_Shutdown() {
+    ImGui_ImplDX11_Data* bd = ImGui_ImplDX11_GetBackendData();
+    if (!bd) return;
+    ImGui_ImplDX11_DestroyDeviceObjects();
+    ImGui::GetIO().BackendRendererUserData = nullptr;
+    IM_DELETE(bd);
+}
+
+static void ImGui_ImplDX11_CreateDeviceObjects() {
+    ImGui_ImplDX11_Data* bd = ImGui_ImplDX11_GetBackendData();
+    if (!bd || bd->pFontTextureView) return;
+
+    // 1. 建立字體紋理
+    ImGuiIO& io = ImGui::GetIO();
+    unsigned char* pixels; int width, height;
+    io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+
+    D3D11_TEXTURE2D_DESC desc = {};
+    desc.Width = width; desc.Height = height; desc.MipLevels = 1; desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT; desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+    D3D11_SUBRESOURCE_DATA subResource = { pixels, (UINT)(width * 4), 0 };
+    ID3D11Texture2D* pTexture = nullptr;
+    bd->pd3dDevice->CreateTexture2D(&desc, &subResource, &pTexture);
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = 1;
+    bd->pd3dDevice->CreateShaderResourceView(pTexture, &srvDesc, &bd->pFontTextureView);
+    pTexture->Release();
+    io.Fonts->SetTexID((ImTextureID)bd->pFontTextureView);
+
+    // 2. 建立採樣器
+    D3D11_SAMPLER_DESC samplerDesc = {};
+    samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR; samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
+    samplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_WRAP; samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+    bd->pd3dDevice->CreateSamplerState(&samplerDesc, &bd->pFontSampler);
+
+    // 3. 內嵌著色器代碼 (HLSL)
+    const char* vertexShaderCode = 
+        "cbuffer vertexBuffer : register(b0) { float4x4 ProjectionMatrix; };\n"
+        "struct VS_INPUT { float2 pos : POSITION; float2 uv  : TEXCOORD0; float4 col : COLOR0; };\n"
+        "struct VS_OUTPUT { float4 pos : SV_POSITION; float4 col : COLOR0; float2 uv  : TEXCOORD0; };\n"
+        "VS_OUTPUT main(VS_INPUT input) {\n"
+        "    VS_OUTPUT output;\n"
+        "    output.pos = mul(ProjectionMatrix, float4(input.pos.xy, 0.f, 1.f));\n"
+        "    output.col = input.col;\n"
+        "    output.uv  = input.uv;\n"
+        "    return output;\n"
+        "}";
+
+    const char* pixelShaderCode = 
+        "struct PS_INPUT { float4 pos : SV_POSITION; float4 col : COLOR0; float2 uv  : TEXCOORD0; };\n"
+        "sampler sampler0 : register(s0);\n"
+        "Texture2D texture0 : register(t0);\n"
+        "float4 main(PS_INPUT input) : SV_Target {\n"
+        "    return input.col * texture0.Sample(sampler0, input.uv);\n"
+        "}";
+
+    // 4. 編譯著色器
+    ID3DBlob* vsBlob = nullptr; ID3DBlob* psBlob = nullptr;
+    D3DCompile(vertexShaderCode, strlen(vertexShaderCode), nullptr, nullptr, nullptr, "main", "vs_4_0", 0, 0, &vsBlob, nullptr);
+    D3DCompile(pixelShaderCode, strlen(pixelShaderCode), nullptr, nullptr, nullptr, "main", "ps_4_0", 0, 0, &psBlob, nullptr);
+
+    bd->pd3dDevice->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &bd->pVertexShader);
+    bd->pd3dDevice->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &bd->pPixelShader);
+
+    // 5. 建立 Input Layout
+    D3D11_INPUT_ELEMENT_DESC local_layout[] = {
+        { "POSITION", 0, DXGI_FORMAT_R32G32_FLOAT,   0, (UINT)offsetof(ImDrawVert, pos), D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,   0, (UINT)offsetof(ImDrawVert, uv),  D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "COLOR",    0, DXGI_FORMAT_R8G8B8A8_UNORM, 0, (UINT)offsetof(ImDrawVert, col), D3D11_INPUT_PER_VERTEX_DATA, 0 },
+    };
+    bd->pd3dDevice->CreateInputLayout(local_layout, 3, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &bd->pInputLayout);
+    vsBlob->Release(); psBlob->Release();
+
+    // 6. 建立常數緩衝區 (Constant Buffer)
+    D3D11_BUFFER_DESC cbDesc = {};
+    cbDesc.ByteWidth = sizeof(VERTEX_CONSTANT_BUFFER); cbDesc.Usage = D3D11_USAGE_DYNAMIC;
+    cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER; cbDesc.CPUAccessFlags = D3D11_CPUAccessFlags::D3D11_CPU_ACCESS_WRITE;
+    bd->pd3dDevice->CreateBuffer(&cbDesc, nullptr, &bd->pVertexConstantBuffer);
+
+    // 7. 渲染狀態設定 (Blend, Depth, Rasterizer)
+    D3D11_BLEND_DESC blend_desc = {};
+    blend_desc.RenderTarget[0].BlendEnable = TRUE;
+    blend_desc.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA; blend_desc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+    blend_desc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD; blend_desc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    blend_desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA; blend_desc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    blend_desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    bd->pd3dDevice->CreateBlendState(&blend_desc, &bd->pBlendState);
+
+    D3D11_DEPTH_STENCIL_DESC depth_desc = {};
+    bd->pd3dDevice->CreateDepthStencilState(&depth_desc, &bd->pDepthStencilState);
+
+    D3D11_RASTERIZER_DESC raster_desc = {};
+    raster_desc.FillMode = D3D11_FILL_SOLID; raster_desc.CullMode = D3D11_CULL_NONE; raster_desc.ScissorEnable = TRUE;
+    bd->pd3dDevice->CreateRasterizerState(&raster_desc, &bd->pRasterizerState);
+}
+
+IMGUI_IMPL_API void ImGui_ImplDX11_NewFrame() {
+    ImGui_ImplDX11_Data* bd = ImGui_ImplDX11_GetBackendData();
+    if (!bd) return;
+    if (!bd->pFontTextureView) ImGui_ImplDX11_CreateDeviceObjects();
+}
+
+// 🎯 核心修正：將被閹割掉的實際繪圖流程 (Draw Call) 完全實作出來
+IMGUI_IMPL_API void ImGui_ImplDX11_RenderDrawData(ImDrawData* draw_data) {
+    ImGui_ImplDX11_Data* bd = ImGui_ImplDX11_GetBackendData();
+    if (!bd || draw_data->DisplaySize.x <= 0.0f || draw_data->DisplaySize.y <= 0.0f) return;
+
+    ID3D11DeviceContext* ctx = bd->pd3dDeviceContext;
+
+    // 建立或動態調整頂點緩衝區大小
+    if (!bd->pVB || bd->VertexBufferSize < draw_data->TotalVtxCount) {
+        if (bd->pVB) bd->pVB->Release();
+        bd->VertexBufferSize = draw_data->TotalVtxCount + 5000;
+        D3D11_BUFFER_DESC desc = { (UINT)(bd->VertexBufferSize * sizeof(ImDrawVert)), D3D11_USAGE_DYNAMIC, D3D11_BIND_VERTEX_BUFFER, D3D11_CPU_ACCESS_WRITE, 0, 0 };
+        bd->pd3dDevice->CreateBuffer(&desc, nullptr, &bd->pVB);
+    }
+    // 建立或動態調整索引緩衝區大小
+    if (!bd->pIB || bd->IndexBufferSize < draw_data->TotalIdxCount) {
+        if (bd->pIB) bd->pIB->Release();
+        bd->IndexBufferSize = draw_data->TotalIdxCount + 10000;
+        D3D11_BUFFER_DESC desc = { (UINT)(bd->IndexBufferSize * sizeof(ImDrawIdx)), D3D11_USAGE_DYNAMIC, D3D11_BIND_INDEX_BUFFER, D3D11_CPU_ACCESS_WRITE, 0, 0 };
+        bd->pd3dDevice->CreateBuffer(&desc, nullptr, &bd->pIB);
+    }
+
+    // 拷貝頂點與索引資料到顯示卡
+    D3D11_MAPPED_SUBRESOURCE vtx_resource, idx_resource;
+    if (ctx->Map(bd->pVB, 0, D3D11_MAP_WRITE_DISCARD, 0, &vtx_resource) != S_OK) return;
+    if (ctx->Map(bd->pIB, 0, D3D11_MAP_WRITE_DISCARD, 0, &idx_resource) != S_OK) return;
+    ImDrawVert* vtx_dst = (ImDrawVert*)vtx_resource.pData;
+    ImDrawIdx* idx_dst = (ImDrawIdx*)idx_resource.pData;
+    for (int n = 0; n < draw_data->CmdListsCount; n++) {
+        const ImDrawList* cmd_list = draw_data->CmdLists[n];
+        memcpy(vtx_dst, cmd_list->VtxBuffer.Data, cmd_list->VtxBuffer.Size * sizeof(ImDrawVert));
+        memcpy(idx_dst, cmd_list->IdxBuffer.Data, cmd_list->IdxBuffer.Size * sizeof(ImDrawIdx));
+        vtx_dst += cmd_list->VtxBuffer.Size;
+        idx_dst += cmd_list->IdxBuffer.Size;
+    }
+    ctx->Unmap(bd->pVB, 0);
+    ctx->Unmap(bd->pIB, 0);
+
+    // 設定正交投影矩陣 (MVP Matrix)
+    {
+        D3D11_MAPPED_SUBRESOURCE mapped_resource;
+        if (ctx->Map(bd->pVertexConstantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_resource) == S_OK) {
+            VERTEX_CONSTANT_BUFFER* constant_buffer = (VERTEX_CONSTANT_BUFFER*)mapped_resource.pData;
+            float L = draw_data->DisplayPos.x;
+            float R = draw_data->DisplayPos.x + draw_data->DisplaySize.x;
+            float T = draw_data->DisplayPos.y;
+            float B = draw_data->DisplayPos.y + draw_data->DisplaySize.y;
+            float mvp[4][4] = {
+                { 2.0f/(R-L),   0.0f,           0.0f,       0.0f },
+                { 0.0f,         2.0f/(T-B),     0.0f,       0.0f },
+                { 0.0f,         0.0f,           0.5f,       0.0f },
+                { (R+L)/(L-R),  (T+B)/(B-T),    0.5f,       1.0f },
+            };
+            memcpy(&constant_buffer->mvp, mvp, sizeof(mvp));
+            ctx->Unmap(bd->pVertexConstantBuffer, 0);
+        }
+    }
+
+    // 設置 DX11 渲染管道狀態
+    UINT stride = sizeof(ImDrawVert); UINT offset = 0;
+    ctx->IASetVertexBuffers(0, 1, &bd->pVB, &stride, &offset);
+    ctx->IASetIndexBuffer(bd->pIB, sizeof(ImDrawIdx) == 2 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT, 0);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->IASetInputLayout(bd->pInputLayout);
+    ctx->VSSetShader(bd->pVertexShader, nullptr, 0);
+    ctx->VSSetConstantBuffers(0, 1, &bd->pVertexConstantBuffer);
+    ctx->PSSetShader(bd->pPixelShader, nullptr, 0);
+    ctx->PSSetSamplers(0, 1, &bd->pFontSampler);
+    ctx->OMSetBlendState(bd->pBlendState, nullptr, 0xffffffff);
+    ctx->OMSetDepthStencilState(bd->pDepthStencilState, 0);
+    ctx->RSSetState(bd->pRasterizerState);
+
+    // 遍歷並執行繪圖指令
+    int global_vtx_offset = 0; int global_idx_offset = 0;
+    ImVec2 clip_off = draw_data->DisplayPos;
+    for (int n = 0; n < draw_data->CmdListsCount; n++) {
+        const ImDrawList* cmd_list = draw_data->CmdLists[n];
+        for (int cmd_i = 0; cmd_i < cmd_list->CmdBuffer.Size; cmd_i++) {
+            const ImDrawCmd* pcmd = &cmd_list->CmdBuffer[cmd_i];
+            
+            // 裁剪視窗設定
+            D3D11_RECT r = { (LONG)(pcmd->ClipRect.x - clip_off.x), (LONG)(pcmd->ClipRect.y - clip_off.y), (LONG)(pcmd->ClipRect.z - clip_off.x), (LONG)(pcmd->ClipRect.w - clip_off.y) };
+            ctx->RSSetScissorRects(1, &r);
+
+            // 綁定紋理並開畫
+            ID3D11ShaderResourceView* texture_srv = (ID3D11ShaderResourceView*)pcmd->GetTexID();
+            ctx->PSSetShaderResources(0, 1, &texture_srv);
+            ctx->DrawIndexed(pcmd->ElemCount, pcmd->IdxOffset + global_idx_offset, pcmd->VtxOffset + global_vtx_offset);
+        }
+        global_vtx_offset += cmd_list->VtxBuffer.Size;
+        global_idx_offset += cmd_list->IdxBuffer.Size;
+    }
+}
 
 // ─── 視窗核心功能代碼 ───
 bool CreateDeviceD3D(HWND hWnd) {
@@ -119,7 +376,6 @@ void RenderLoop() {
 
     if (!g_hWnd) { g_Running = false; return; }
 
-    // 🎯 點擊穿透關鍵：全透明背景設置
     SetLayeredWindowAttributes(g_hWnd, RGB(0, 0, 0), 255, LWA_COLORKEY);
     
     MARGINS margins = { -1, -1, -1, -1 };
@@ -217,7 +473,6 @@ void RenderLoop() {
 
         // ─── 控制選單層 ───
         if (g_ShowMenu) {
-            // 當選單顯示時，移除 WS_EX_TRANSPARENT 以允許滑鼠點擊選單
             SetWindowLong(g_hWnd, GWL_EXSTYLE, WS_EX_TOPMOST | WS_EX_LAYERED);
             ImGui::SetNextWindowSize(ImVec2(520, 360), ImGuiCond_FirstUseEver);
             ImGui::Begin(u8"XUANS 高級核心控制器", nullptr, ImGuiWindowFlags_NoTitleBar);
@@ -297,31 +552,24 @@ void RenderLoop() {
             ImGui::PopStyleColor(); ImGui::PopStyleVar();   
             ImGui::End();
         } else {
-            // 選單關閉時，必須加上 WS_EX_TRANSPARENT 實現極致的「滑鼠全穿透」，才不會卡住遊戲視角
             SetWindowLong(g_hWnd, GWL_EXSTYLE, WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED);
         }
 
         ImGui::Render();
         
-        // 🎯 核心修正：將透明背景渲染到後端緩衝區
         const float clear_color_with_alpha[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
         g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
         g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color_with_alpha);
         
-        // 呼叫官方標準後端渲染繪圖指令
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
         g_pSwapChain->Present(1, 0); 
     }
 
-    // ─── 乾淨的資源銷毀 ───
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
     CleanupDeviceD3D();
-    if (g_hWnd) {
-        DestroyWindow(g_hWnd);
-        g_hWnd = nullptr;
-    }
+    if (g_hWnd) { DestroyWindow(g_hWnd); g_hWnd = nullptr; }
     UnregisterClassW(L"XUANS_Overlay", GetModuleHandle(nullptr));
 }
 
@@ -329,20 +577,14 @@ void RenderLoop() {
 extern "C" {
     __declspec(dllexport) void StartOverlay() {
         if (g_Running) return;
-        g_Running = true; 
-        g_Initialized = false; 
+        g_Running = true; g_Initialized = false; 
         g_RenderThread = std::thread(RenderLoop);
     }
-
     __declspec(dllexport) void StopOverlay() { 
         if (!g_Running) return;
-        g_Running = false; 
-        g_Initialized = false; 
-        if (g_RenderThread.joinable()) {
-            g_RenderThread.join(); // 🎯 修正：使用 join 確保線程完全結束才退出 DLL，防範釋放記憶體時閃退
-        }
+        g_Running = false; g_Initialized = false; 
+        if (g_RenderThread.joinable()) g_RenderThread.join();
     }
-
     __declspec(dllexport) void ToggleMenu(bool visible) { if (g_Initialized) g_ShowMenu = visible; }
     __declspec(dllexport) bool GetAimbotState() { return g_AimbotState; }
     __declspec(dllexport) float gGetAimbotFov() { return g_AimbotFov; } 
